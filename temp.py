@@ -3,7 +3,7 @@
 from pickle import FALSE
 import subprocess
 import sys
-import chromadb.utils.embedding_functions
+# import chromadb.utils.embedding_functions
 
 def install_package(package):
     """Install a package if not already installed"""
@@ -110,14 +110,20 @@ class EventDetailsForAgent:
     def to_dict(self):
         return {
             'event_id': self.event_id,
-            'name': self.event_name,
+            'event_name': self.event_name,  # Keep original field name for consistency
+            'name': self.event_name,  # Also provide 'name' for display
             'description': self.description,
             'activity': self.activity,
             'start_time': self.start_time,
             'end_time': self.end_time,
             'allowed_friends': self.allowed_friends,
             'ticket_price': self.ticket_price,
-            'registration_url': self.event_url,
+            'event_url': self.event_url,
+            'registration_url': self.event_url,  # Fallback field 1
+            'signup_url': self.event_url,       # Fallback field 2
+            'booking_url': self.event_url,      # Fallback field 3
+            'link': self.event_url,             # Fallback field 4
+            'url': self.event_url,              # Fallback field 5
             'available_spots': self.available_spots,
             'location_name': self.location_name,
             'location_url': self.location_url,
@@ -195,7 +201,7 @@ class ChromaDBManager:
             ('Price', f"₹{event_data.get('ticket_price')}" if event_data.get('ticket_price') is not None else None),
             ('Spots', event_data.get('available_spots')),
             ('Payment', event_data.get('payment_terms')),
-            ('Event Link', event_data.get('event_url')),  # Primary event access URL
+            ('Event Link', event_data.get('event_url') or event_data.get('registration_url') or event_data.get('signup_url') or event_data.get('booking_url') or event_data.get('link') or event_data.get('url') or ''),  # Comprehensive URL fallback
             ('Location Link', event_data.get('location_url'))
         ]
 
@@ -264,16 +270,32 @@ class ChromaDBManager:
                 # Handle integer event IDs - convert to string
                 event_id = str(event.get('event_id')) if event.get('event_id') is not None else str(uuid.uuid4())
                 
+                # Create comprehensive URL fallback
+                event_url = (
+                    event.get('event_url') or 
+                    event.get('registration_url') or 
+                    event.get('signup_url') or 
+                    event.get('booking_url') or 
+                    event.get('link') or 
+                    event.get('url') or 
+                    ''
+                )
+                
                 metadata = {
                     'event_id': event_id,
-                    'name': str(event.get('event_name', '')),
+                    'name': str(event.get('name', '') or event.get('event_name', '')),
+                    'event_name': str(event.get('event_name', '') or event.get('name', '')),
                     'description': self._clean_description(event.get('description')),
                     'activity': str(event.get('activity', '')),
                     'start_time': str(event.get('start_time', '')),
                     'end_time': str(event.get('end_time', '')),
                     'ticket_price': str(event.get('ticket_price', '')),
-                    'event_url': str(event.get('event_url', '')),
-                    'registration_url': str(event.get('event_url', '')),
+                    'event_url': str(event_url),
+                    'registration_url': str(event_url),  # Store in multiple fields
+                    'signup_url': str(event_url),
+                    'booking_url': str(event_url),
+                    'link': str(event_url),
+                    'url': str(event_url),
                     'available_spots': str(event.get('available_spots', '')),
                     'location_name': str(event.get('location_name', '')),
                     'location_url': str(event.get('location_url', '')),
@@ -283,6 +305,14 @@ class ChromaDBManager:
                     'payment_terms': str(event.get('payment_terms', ''))
                 }
 
+                # Debug: Print detailed metadata being stored
+                print(f"\n💾 STORING Event {event_id} in ChromaDB:")
+                print(f"   📛 Name: {metadata.get('name', 'MISSING')}")
+                print(f"   🔗 Event URL: {metadata.get('event_url', 'MISSING')}")
+                print(f"   🏢 Club: {metadata.get('club_name', 'MISSING')}")
+                print(f"   📍 Location: {metadata.get('location_name', 'MISSING')}")
+                print(f"   💰 Price: {metadata.get('ticket_price', 'MISSING')}")
+                
                 doc_text = self.prepare_event_text(metadata)
                 
                 documents.append(doc_text)
@@ -295,14 +325,23 @@ class ChromaDBManager:
             
             for i in range(0, len(documents), batch_size):
                 try:
+                    batch_docs = documents[i:i+batch_size]
+                    batch_metas = metadatas[i:i+batch_size]
+                    batch_ids = ids[i:i+batch_size]
+                    
+                    print(f"\n📦 Adding batch {i//batch_size + 1} to ChromaDB ({len(batch_docs)} events):")
+                    for j, (doc_id, meta) in enumerate(zip(batch_ids, batch_metas)):
+                        print(f"   {j+1}. ID: {doc_id}, Name: {meta.get('name', 'N/A')}, URL: {meta.get('event_url', 'N/A')[:50]}...")
+                    
                     self.collection.add(
-                        documents=documents[i:i+batch_size],
-                        metadatas=metadatas[i:i+batch_size],
-                        ids=ids[i:i+batch_size]
+                        documents=batch_docs,
+                        metadatas=batch_metas,
+                        ids=batch_ids
                     )
-                    print(f"✓ Added batch {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1}")
+                    print(f"✅ Successfully added batch {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1}")
                 except Exception as e:
                     print(f"❌ Failed to add batch {i//batch_size + 1}: {str(e)}")
+                    print(f"   📊 Batch details: {len(batch_docs)} documents, {len(batch_metas)} metadatas, {len(batch_ids)} IDs")
                     success = False
                     # Continue trying remaining batches
 
@@ -371,6 +410,8 @@ class ChromaDBManager:
                for i, (metadata, document) in enumerate(zip(results['metadatas'][0], 
                                                          results['documents'][0])):
                   if metadata:
+                     # Debug: Check what URL data is being retrieved
+                     print(f"🔧 DEBUG: Retrieved event {metadata.get('name', 'Unknown')} with URL: {metadata.get('event_url', 'MISSING')}")
                      event = metadata.copy()
                      
                      # Add relevance scoring
@@ -491,46 +532,89 @@ class ChromaDBManager:
             return {}
 
     def format_event_for_display(self, event: dict) -> str:
-        """
-        Format an event for nice display with proper URL handling
-
-        Args:
-            event: Event dictionary from ChromaDB
-
-        Returns:
-            Formatted string for display
-        """
-        if not event:
-            return "No event information available"
-
-        lines = [
-            f"🎉 **{event.get('name', 'Event')}**",
-            f"🏷️ **Club**: {event.get('club_name', 'N/A')}",
-            f"🏆 **Activity**: {event.get('activity', 'N/A')}",
-            f"📅 **When**: {event.get('start_time', 'N/A')} to {event.get('end_time', 'N/A')}",
-            f"📍 **Where**: {event.get('location_name', 'N/A')}",
-            f"🗺️ **Area**: {event.get('area_name', 'N/A')}, {event.get('city_name', 'N/A')}",
-            f"💰 **Price**: ₹{event.get('ticket_price', 'N/A')}",
-            f"🎟️ **Available Spots**: {event.get('available_spots', 'N/A')}",
-            f"💳 **Payment Terms**: {event.get('payment_terms', 'N/A')}"
-        ]
-
-        # Add description if available (truncated)
-        if event.get('description'):
-            desc = event['description']
-            if len(desc) > 200:
-                desc = desc[:200] + "..."
-            lines.append(f"📝 **Description**: {desc}")
-
-        # Add the primary event URL
-        if event.get('event_url'):
-            lines.append(f"🔗 **Event Page**: {event['event_url']}")
-
-        # Add location URL if available
-        if event.get('location_url'):
-            lines.append(f"🗺️ **Location Map**: {event['location_url']}")
-
-        return "\n".join(lines)
+      """
+      Format an event for nice display with proper URL handling and debugging
+      
+      Args:
+         event: Event dictionary from ChromaDB
+         
+      Returns:
+         Formatted string for display
+      """
+      # Debugging: Print raw event structure
+      print("\nDEBUG - Raw Event Structure:")
+      print(event)
+      
+      if not event:
+         return "🚫 No event information available"
+      
+      # Ensure we have a proper dictionary
+      if not isinstance(event, dict):
+         return f"⚠️ Invalid event format: {type(event)} received"
+      
+      # Safely get values with type conversion
+      def safe_get(key, default="N/A"):
+         value = event.get(key)
+         if value is None:
+               return default
+         return str(value).strip()
+      
+      # Build each line carefully
+      lines = []
+      try:
+         # Use both name fields with fallback
+         event_name = event.get('name') or event.get('event_name', 'Unnamed Event')
+         lines.append(f"🎉 **{event_name}**")
+         lines.append(f"🏷️ **Club**: {safe_get('club_name')}")
+         lines.append(f"🏆 **Activity**: {safe_get('activity')}")
+         
+         # Handle date/time carefully
+         start_time = safe_get('start_time')
+         end_time = safe_get('end_time')
+         time_str = f"{start_time} to {end_time}" if start_time != "N/A" or end_time != "N/A" else "N/A"
+         lines.append(f"📅 **When**: {time_str}")
+         
+         lines.append(f"📍 **Where**: {safe_get('location_name')}")
+         lines.append(f"🗺️ **Area**: {safe_get('area_name')}, {safe_get('city_name')}")
+         
+         # Handle price formatting
+         price = safe_get('ticket_price')
+         if price.replace('.', '').isdigit():  # Simple numeric check
+               lines.append(f"💰 **Price**: ₹{price}")
+         else:
+               lines.append(f"💰 **Price**: {price}")
+               
+         lines.append(f"🎟️ **Available Spots**: {safe_get('available_spots')}")
+         lines.append(f"💳 **Payment Terms**: {safe_get('payment_terms')}")
+         
+         # Handle description
+         desc = safe_get('description')
+         if desc and desc != "N/A":
+               desc = desc[:200] + "..." if len(desc) > 200 else desc
+               lines.append(f"\n📝 **Description**: {desc}")
+         
+         # Handle URLs with comprehensive fallback
+         def get_display_url(event_dict):
+             url_fields = ['event_url', 'registration_url', 'signup_url', 'booking_url', 'link', 'url']
+             for field in url_fields:
+                 url = event_dict.get(field, '').strip()
+                 if url and url != "N/A":
+                     return url
+             return ''
+         
+         event_url = get_display_url(event)
+         if event_url:
+               lines.append(f"\n🔗 **Event Page**: {event_url}")
+               
+         location_url = safe_get('location_url')
+         if location_url and location_url != "N/A":
+               lines.append(f"🗺️ **Location Map**: {location_url}")
+               
+      except Exception as e:
+         print(f"⚠️ Formatting error: {str(e)}")
+         return f"⚠️ Error formatting event details: {str(e)}"
+      
+      return "\n".join(lines)
 
 class EventSyncManager:
     def __init__(self, chroma_manager: ChromaDBManager):
@@ -759,25 +843,56 @@ class MeetupBot:
         
         response = "Here are some events that might interest you:\n\n"
         
-        for i, event in enumerate(events, 1):
-            response += f"🎉 **{event.get('name', 'Event')}**\n"
+        for event in events:
+            # Use both name fields with fallback
+            event_name = event.get('name') or event.get('event_name', 'Event')
+            response += f"🎉 **{event_name}**\n"
             response += f"🏷️ **Club**: {event.get('club_name', 'N/A')}\n"
             response += f"🏆 **Activity**: {event.get('activity', 'N/A')}\n"
             response += f"📅 **When**: {event.get('start_time', 'N/A')} to {event.get('end_time', 'N/A')}\n"
             response += f"📍 **Where**: {event.get('location_name', 'N/A')}\n"
             response += f"🗺️ **Area**: {event.get('area_name', 'N/A')}, {event.get('city_name', 'N/A')}\n"
-            response += f"💰 **Price**: ₹{event.get('ticket_price', 'N/A')}\n"
+            
+            # Format price properly
+            price = event.get('ticket_price', 'N/A')
+            if price and str(price).replace('.', '').isdigit():
+                response += f"💰 **Price**: ₹{price}\n"
+            else:
+                response += f"💰 **Price**: {price}\n"
+                
             response += f"🎟️ **Available Spots**: {event.get('available_spots', 'N/A')}\n"
             response += f"💳 **Payment Terms**: {event.get('payment_terms', 'N/A')}\n"
             
+            # Format description
             if event.get('description'):
                 desc = event['description']
                 if len(desc) > 200:  # Truncate long descriptions
                     desc = desc[:200] + "..."
                 response += f"📝 **Description**: {desc}\n"
             
-            if event.get('registration_url'):
-                response += f"🔗 **Register Here**: {event['registration_url']}\n"
+            # Comprehensive URL fallback system
+            def get_event_url(event_dict):
+                url_fields = ['event_url', 'registration_url', 'signup_url', 'booking_url', 'link', 'url']
+                for field in url_fields:
+                    url = event_dict.get(field, '').strip()
+                    if url:
+                        return url
+                return ''
+            
+            event_url = get_event_url(event)
+            print(f"🔧 DEBUG: Event {event.get('name', 'Unknown')} URL check:")
+            print(f"   event_url='{event.get('event_url', '')}'")
+            print(f"   registration_url='{event.get('registration_url', '')}'")
+            print(f"   signup_url='{event.get('signup_url', '')}'")
+            print(f"   booking_url='{event.get('booking_url', '')}'")
+            print(f"   link='{event.get('link', '')}'")
+            print(f"   url='{event.get('url', '')}'")
+            print(f"   final_url='{event_url}'")
+            
+            if event_url:
+                response += f"🔗 **Register Here**: {event_url}\n"
+            else:
+                print(f"⚠️ DEBUG: No URL found for event {event.get('name', 'Unknown')} in any field")
             if event.get('location_url'):
                 response += f"🗺️ **Location Map**: {event['location_url']}\n"
             
@@ -794,14 +909,25 @@ class MeetupBot:
         events_context = "Relevant Events Data (from vector search):\n"
         if relevant_events:
             for event in relevant_events:
-                events_context += f"🎯 Event: {event.get('name', 'N/A')}\n"
+                event_name = event.get('name') or event.get('event_name', 'N/A')
+                events_context += f"🎯 Event: {event_name}\n"
                 events_context += f"  Club: {event.get('club_name', 'N/A')}\n"
                 events_context += f"  Activity: {event.get('activity', 'N/A')}\n"
                 events_context += f"  When: {event.get('start_time', 'N/A')} to {event.get('end_time', 'N/A')}\n"
                 events_context += f"  Where: {event.get('location_name', 'N/A')} ({event.get('area_name', 'N/A')}, {event.get('city_name', 'N/A')})\n"
                 events_context += f"  Price: ₹{event.get('ticket_price', 'N/A')} | Spots: {event.get('available_spots', 'N/A')}\n"
                 events_context += f"  Payment: {event.get('payment_terms', 'N/A')}\n"
-                events_context += f"  URL: {event.get('registration_url', 'N/A')}\n\n"
+                # Use comprehensive URL fallback for context
+                def get_event_url_context(event_dict):
+                    url_fields = ['event_url', 'registration_url', 'signup_url', 'booking_url', 'link', 'url']
+                    for field in url_fields:
+                        url = event_dict.get(field, '').strip()
+                        if url:
+                            return url
+                    return 'N/A'
+                
+                event_url = get_event_url_context(event)
+                events_context += f"  URL: {event_url}\n\n"
         else:
             events_context += "No specific events found for this query.\n"
         
