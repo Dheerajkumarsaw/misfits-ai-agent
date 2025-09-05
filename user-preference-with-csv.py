@@ -374,6 +374,8 @@ class ChromaDBManager:
                     attended = act.get("meetup_attended", "")
                     segment = f"{club_name} ({club_id}) | Activity: {activity} | City: {act_city} | Areas: {areas_text} | Attended: {attended}"
                     activities_texts.append(segment)
+            # CSV fallback: use activities_summary if no structured activities present
+            activities_summary_csv = str(pref.get("activities_summary", "") or "")
 
             parts = [f"User: {user_id}"]
             if user_name:
@@ -382,6 +384,8 @@ class ChromaDBManager:
                 parts.append(f"Current City: {current_city}")
             if activities_texts:
                 parts.append("Activities: " + " || ".join(activities_texts))
+            elif activities_summary_csv:
+                parts.append("Activities: " + activities_summary_csv)
 
             # Fallback if nothing substantial present
             if len(parts) <= 1:
@@ -398,7 +402,14 @@ class ChromaDBManager:
     def add_user_preferences_batch(self, preferences: List[dict], clear_existing: bool = False) -> bool:
         """Add or update a batch of user preferences into the user_preferences collection."""
         try:
-            print(f"🔄 add_user_preferences_batch called with {len(preferences) if preferences else 0} items (clear_existing={clear_existing})", flush=True)
+            print(f"🔄 DEBUG: add_user_preferences_batch called with {len(preferences) if preferences else 0} items (clear_existing={clear_existing})", flush=True)
+            
+            # Check if user_prefs_collection is properly initialized
+            if not hasattr(self, 'user_prefs_collection') or self.user_prefs_collection is None:
+                print(f"❌ DEBUG: user_prefs_collection is not initialized!", flush=True)
+                return False
+            
+            print(f"🔧 DEBUG: user_prefs_collection type: {type(self.user_prefs_collection)}", flush=True)
             if clear_existing:
                 try:
                     existing_items = self.user_prefs_collection.get()
@@ -422,11 +433,19 @@ class ChromaDBManager:
             documents = []
             metadatas = []
             ids = []
-            for pref in preferences:
+            
+            print(f"🔧 DEBUG: Starting to prepare {len(preferences)} preferences for ChromaDB", flush=True)
+            
+            for idx, pref in enumerate(preferences):
                 if not isinstance(pref, dict):
+                    print(f"❌ DEBUG: Preference {idx} is not a dict: {type(pref)}", flush=True)
                     continue
                 user_id = self._extract_user_id(pref)
                 doc_text = self.prepare_user_pref_text(pref)
+                
+                if idx < 3:  # Log first few for debugging
+                    print(f"🔧 DEBUG: Preference {idx} - user_id: {user_id}", flush=True)
+                    print(f"🔧 DEBUG: Preference {idx} - doc_text: {doc_text[:200]}...", flush=True)
 
                 # Flatten metadata to only primitive types
                 user_name = str(pref.get("user_name") or pref.get("username") or pref.get("name") or "")
@@ -448,6 +467,11 @@ class ChromaDBManager:
                         attended = act.get("meetup_attended", "")
                         activities_texts.append(f"{club_name}|{activity}|{act_city}|{areas_text}|{attended}")
                 activities_summary = " ; ".join(activities_texts)
+                # CSV fallback: use plain activities_summary if structured activities not available
+                if not activities_summary:
+                    csv_summary = pref.get("activities_summary")
+                    if csv_summary:
+                        activities_summary = str(csv_summary)
 
                 metadata = {
                     "user_id": user_id,
@@ -467,25 +491,59 @@ class ChromaDBManager:
                 metadatas.append(cleaned_metadata)
                 ids.append(user_id)
 
+            print(f"🔧 DEBUG: Prepared {len(documents)} documents, {len(metadatas)} metadatas, {len(ids)} ids", flush=True)
+            
+            if len(documents) != len(metadatas) or len(documents) != len(ids):
+                print(f"❌ DEBUG: Array length mismatch! docs:{len(documents)}, meta:{len(metadatas)}, ids:{len(ids)}", flush=True)
+                return False
+            
+            # Show sample of what we're about to insert
+            if documents:
+                print(f"🔧 DEBUG: Sample document: {documents[0][:200]}...", flush=True)
+                print(f"🔧 DEBUG: Sample metadata: {metadatas[0]}", flush=True)
+                print(f"🔧 DEBUG: Sample id: {ids[0]}", flush=True)
+            
             added_count = 0
             batch_size = 200
+            total_batches = (len(documents) + batch_size - 1) // batch_size
+            print(f"🔧 DEBUG: Will process {total_batches} batches of size {batch_size}", flush=True)
+            
             for i in range(0, len(documents), batch_size):
                 batch_docs = documents[i:i+batch_size]
                 batch_meta = metadatas[i:i+batch_size]
                 batch_ids = ids[i:i+batch_size]
+                batch_num = i//batch_size + 1
+                
                 try:
-                    print(f"📦 Adding user prefs batch {i//batch_size + 1} with {len(batch_docs)} items", flush=True)
-                    self.user_prefs_collection.add(
+                    print(f"📦 DEBUG: Adding user prefs batch {batch_num}/{total_batches} with {len(batch_docs)} items", flush=True)
+                    
+                    # Try the actual ChromaDB add operation
+                    result = self.user_prefs_collection.add(
                         documents=batch_docs,
                         metadatas=batch_meta,
                         ids=batch_ids
                     )
+                    print(f"🔧 DEBUG: ChromaDB add() returned: {result}", flush=True)
+                    
                     added_count += len(batch_docs)
-                    print(f"✅ Added user prefs batch {i//batch_size + 1}", flush=True)
+                    print(f"✅ DEBUG: Successfully added user prefs batch {batch_num}/{total_batches}", flush=True)
+                    
                 except Exception as e:
-                    print(f"❌ Failed to add user prefs batch {i//batch_size}: {str(e)}", flush=True)
+                    print(f"❌ DEBUG: Failed to add user prefs batch {batch_num}: {str(e)}", flush=True)
+                    print(f"❌ DEBUG: Exception type: {type(e)}", flush=True)
+                    import traceback
+                    print(f"❌ DEBUG: Full traceback:\n{traceback.format_exc()}", flush=True)
                     continue
-            print(f"✅ Added/updated {added_count} user preferences to ChromaDB", flush=True)
+                    
+            print(f"✅ DEBUG: Final result - Added/updated {added_count} user preferences to ChromaDB", flush=True)
+            
+            # Verify the data was actually saved
+            try:
+                collection_count = self.user_prefs_collection.count()
+                print(f"🔧 DEBUG: Collection count after insertion: {collection_count}", flush=True)
+            except Exception as e:
+                print(f"❌ DEBUG: Error checking collection count: {e}", flush=True)
+            
             return added_count > 0
         except Exception as e:
             print(f"❌ Critical error in add_user_preferences_batch: {str(e)}")
@@ -923,161 +981,27 @@ class EventSyncManager:
             time.sleep(interval_minutes * 60)
 
 class UserPreferenceSyncManager:
-    def __init__(self, chroma_manager: ChromaDBManager, page_limit: int = 2000):
-        self.api_url = "https://notify.misfits.net.in/api/user/preferences"
+    def __init__(self, chroma_manager: ChromaDBManager):
         self.chroma_manager = chroma_manager
-        self.page_limit = page_limit
         self.is_running = False
         self.sync_thread = None
 
-    def _extract_list_from_response(self, data) -> List[dict]:
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        if isinstance(data, dict):
-            for key in ["user_preferences", "preferences", "data", "users", "items", "results", "list"]:
-                value = data.get(key)
-                if isinstance(value, list):
-                    return [item for item in value if isinstance(item, dict)]
-        return []
 
-    def fetch_user_preferences_page(self, cursor: int) -> tuple:
-        try:
-            print(f"🔄 Fetching user preferences with cursor={cursor} (pageLimit={self.page_limit})", flush=True)
-            payload = {
-                "filterOptions": {
-                    "cursor": cursor,
-                    "offset": 0,
-                    "pageLimit": self.page_limit,
-                    "searchText": ""
-                }
-            }
-            headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            }
-            response = requests.post(self.api_url, json=payload, headers=headers, timeout=60)
-            if response.status_code != 200:
-                print(f"❌ User preferences API failed with status {response.status_code}", flush=True)
-                return [], None
-            data = response.json()
-            prefs = self._extract_list_from_response(data)
-            if not prefs:
-                print("ℹ️ No user preferences returned for this page", flush=True)
-                return [], None
-            # Determine next_cursor as the highest numeric user id in this page
-            next_cursor = None
-            max_numeric_id = None
-            for item in prefs:
-                if not isinstance(item, dict):
-                    continue
-                for key in ["user_id", "userId", "id", "uid", "_id"]:
-                    if key in item and item[key] not in [None, ""]:
-                        try:
-                            candidate = int(item[key])
-                        except Exception:
-                            try:
-                                candidate = int(str(item[key]).strip().split("-")[-1])
-                            except Exception:
-                                candidate = None
-                        if candidate is not None:
-                            if max_numeric_id is None or candidate > max_numeric_id:
-                                max_numeric_id = candidate
-                        break
-            next_cursor = max_numeric_id
-            return prefs, next_cursor
-        except Exception as e:
-            print(f"❌ Error fetching user preferences: {e}")
-            return [], None
+    def fetch_user_preferences_page(self, cursor: int = None) -> tuple:
+        print("ℹ️ User preferences are now managed via CSV files only.", flush=True)
+        print("ℹ️ Please use import_user_preferences_from_csv_path() or prompt_and_import_csv_interactive() methods.", flush=True)
+        return [], None
 
     def run_full_sync(self, clear_existing: bool = False):
-        try:
-            print("🚀 Starting full user preferences sync...", flush=True)
-            cursor = 0
-            seen_cursors = set()
-            first_batch = True
-            total = 0
-            processed_ids = set()
-            while True:
-                if cursor in seen_cursors:
-                    print("⚠️ Cursor repetition detected; incrementing to avoid loop", flush=True)
-                    cursor += 1
-                seen_cursors.add(cursor)
-                prefs, next_cursor = self.fetch_user_preferences_page(cursor)
-                if not prefs:
-                    print("✅ Completed user preferences sync (no more data)")
-                    break
-                print(f"📄 Retrieved {len(prefs)} user preferences; page_next_cursor={next_cursor}", flush=True)
-
-                # Deduplicate within this run
-                filtered = []
-                page_ids_int = []
-                for p in prefs:
-                    try:
-                        uid_str = self.chroma_manager._extract_user_id(p)
-                        uid_int = int(uid_str)
-                        page_ids_int.append(uid_int)
-                        if uid_str not in processed_ids:
-                            filtered.append(p)
-                            processed_ids.add(uid_str)
-                    except Exception:
-                        continue
-
-                success = self.chroma_manager.add_user_preferences_batch(
-                    filtered,
-                    clear_existing=clear_existing and first_batch
-                )
-                first_batch = False
-                if not success:
-                    print("❌ Failed to upsert user preferences for current page, continuing", flush=True)
-                total += len(filtered)
-                # Advance cursor using the highest user_id from this page
-                if page_ids_int:
-                    page_max = max(page_ids_int)
-                    new_cursor = page_max
-                else:
-                    new_cursor = next_cursor
-
-                if new_cursor is None:
-                    print("ℹ️ No valid next cursor returned; stopping.", flush=True)
-                    break
-
-                if new_cursor <= cursor:
-                    print(f"↪️ Non-advancing cursor detected ({new_cursor} <= {cursor}); incrementing by 1", flush=True)
-                    new_cursor = cursor + 1
-
-                print(f"↪️ Advancing cursor: {cursor} -> {new_cursor}", flush=True)
-                cursor = new_cursor
-            print(f"✅ User preferences sync finished. Total records processed: {total}", flush=True)
-            try:
-                cnt = self.chroma_manager.user_prefs_collection.count()
-                print(f"📊 User preferences collection count now: {cnt}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Could not read user prefs count: {e}", flush=True)
-        except Exception as e:
-            print(f"❌ Error during user preferences sync: {e}")
+        print("ℹ️ User preferences sync is now handled via CSV import only.", flush=True)
+        print("ℹ️ Use import_user_preferences_from_csv_path() to import from CSV files.", flush=True)
+        return
 
     def start_periodic_sync(self, interval_hours: int = 24, clear_existing_first_run: bool = False):
-        """Start periodic synchronization, defaulting to once per day."""
-        if self.is_running:
-            print("⚠️ User preferences sync is already running")
-            return
-        self.is_running = True
-        def _loop():
-            first = True
-            while self.is_running:
-                try:
-                    self.run_full_sync(clear_existing=clear_existing_first_run and first)
-                except Exception as e:
-                    print(f"❌ Error in periodic user preferences sync: {e}")
-                first = False
-                sleep_seconds = max(1, int(interval_hours * 3600))
-                for _ in range(sleep_seconds):
-                    if not self.is_running:
-                        break
-                    time.sleep(1)
-        self.sync_thread = threading.Thread(target=_loop, daemon=True)
-        self.sync_thread.start()
-        print(f"🔄 Started user preferences periodic sync every {interval_hours} hours")
+        """CSV-based user preferences don't require periodic sync."""
+        print("ℹ️ Periodic sync not needed for CSV-based user preferences.", flush=True)
+        print("ℹ️ Import new CSV files as needed using import methods.", flush=True)
+        return
 
     def stop_periodic_sync(self):
         """Stop periodic synchronization"""
@@ -1085,6 +1009,325 @@ class UserPreferenceSyncManager:
         if self.sync_thread and self.sync_thread.is_alive():
             self.sync_thread.join()
         print("🛑 Stopped user preferences periodic sync")
+
+    def import_user_preferences_from_dataframe(self, df: 'pd.DataFrame') -> int:
+        """Import user preferences from a pandas DataFrame and upsert into ChromaDB."""
+        try:
+            print(f"🔧 DEBUG: Starting import_user_preferences_from_dataframe", flush=True)
+            if df is None:
+                print("❌ DEBUG: DataFrame is None", flush=True)
+                return 0
+            if df.empty:
+                print("❌ DEBUG: DataFrame is empty", flush=True)
+                return 0
+            
+            print(f"🔧 DEBUG: DataFrame shape: {df.shape}", flush=True)
+            print(f"🔧 DEBUG: DataFrame columns: {list(df.columns)}", flush=True)
+            
+            # Clean column names - remove BOM and extra whitespace
+            df.columns = [str(col).strip().replace('\ufeff', '').replace('﻿', '') for col in df.columns]
+            print(f"🔧 DEBUG: Cleaned DataFrame columns: {list(df.columns)}", flush=True)
+            
+            print(f"🔧 DEBUG: First few rows:\n{df.head()}", flush=True)
+            # Build case-insensitive column lookup
+            lower_to_col = {str(c).strip().lower(): c for c in df.columns}
+
+            def pick_col(*candidates: str):
+                for cand in candidates:
+                    key = cand.strip().lower()
+                    if key in lower_to_col:
+                        return lower_to_col[key]
+                return None
+
+            # Core columns based on actual CSV export structure
+            id_col = pick_col('user id', 'user_id', 'userid', 'id', 'uid', '_id')  # Added: "user id" with space
+            user_name_col = pick_col('user_name', 'username', 'display_name', 'name')
+            first_name_col = pick_col('first name', 'first_name', 'firstname', 'first')  # Added: "first name" with space
+            last_name_col = pick_col('last name', 'last_name', 'lastname', 'last', 'surname')  # Added: "last name" with space
+            user_city_col = pick_col('user city', 'user_city', 'current_city', 'city', 'city_name')  # Added: "user city" with space
+            # Activity row columns
+            club_name_col = pick_col('club name', 'club_name', 'club', 'group', 'group_name', 'community', 'team')  # Added: "club name" with space
+            club_id_col = pick_col('club id', 'club_id', 'clubid')  # Added: "club id" with space
+            activity_col = pick_col('activity', 'category')
+            activity_city_col = pick_col('club city', 'club_city', 'activity_city', 'city', 'city_name')  # Added: "club city" with space
+            areas_col = pick_col('areas', 'area', 'locality', 'neighborhood')
+            meetup_attended_col = pick_col('attended event count', 'attended_event_count', 'meetup_attended', 'attended', 'count')  # Added: "attended event count" with spaces
+            # Optional direct summary and structured activities JSON
+            activities_summary_col = pick_col('activities_summary')
+            activities_json_col = pick_col('user_activities', 'activities')
+            
+            print(f"🔧 DEBUG: Column mappings:", flush=True)
+            print(f"  id_col: {id_col} ('{id_col}' found in columns)" if id_col else f"  id_col: None (not found)", flush=True)
+            print(f"  first_name_col: {first_name_col}", flush=True)
+            print(f"  last_name_col: {last_name_col}", flush=True)
+            print(f"  user_city_col: {user_city_col}", flush=True)
+            print(f"  club_name_col: {club_name_col}", flush=True)
+            print(f"  club_id_col: {club_id_col}", flush=True)
+            print(f"  activity_col: {activity_col}", flush=True)
+            print(f"  activity_city_col: {activity_city_col}", flush=True)
+            print(f"  areas_col: {areas_col}", flush=True)
+            print(f"  meetup_attended_col: {meetup_attended_col}", flush=True)
+            
+            print(f"🔧 DEBUG: Available column names in lowercase: {list(lower_to_col.keys())}", flush=True)
+
+            # Group by user_id, aggregating activities across rows
+            grouped: Dict[str, dict] = {}
+            processed_rows = 0
+            skipped_rows = 0
+            
+            print(f"🔧 DEBUG: Starting to process {len(df)} rows", flush=True)
+            
+            for idx, row in df.iterrows():
+                processed_rows += 1
+                # user_id
+                if id_col is None:
+                    print(f"❌ DEBUG: Row {idx}: No user_id column found, skipping", flush=True)
+                    skipped_rows += 1
+                    continue
+                v = row.get(id_col)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    print(f"❌ DEBUG: Row {idx}: Empty user_id, skipping", flush=True)
+                    skipped_rows += 1
+                    continue
+                user_id = str(v)
+                
+                if processed_rows <= 3:  # Only log first few rows to avoid spam
+                    print(f"🔧 DEBUG: Row {idx}: Processing user_id={user_id}", flush=True)
+
+                # Initialize base record
+                rec = grouped.get(user_id)
+                if rec is None:
+                    # user_name
+                    user_name = None
+                    if user_name_col is not None:
+                        nv = row.get(user_name_col)
+                        user_name = None if pd.isna(nv) else str(nv)
+                    if not user_name:
+                        first_part = None
+                        last_part = None
+                        if first_name_col is not None:
+                            fv = row.get(first_name_col)
+                            first_part = None if pd.isna(fv) else str(fv)
+                        if last_name_col is not None:
+                            lv = row.get(last_name_col)
+                            last_part = None if pd.isna(lv) else str(lv)
+                        name_parts = [p for p in [first_part, last_part] if p]
+                        if name_parts:
+                            user_name = " ".join(name_parts)
+
+                    # user-level city
+                    current_city = None
+                    if user_city_col is not None:
+                        cv = row.get(user_city_col)
+                        current_city = None if pd.isna(cv) else str(cv)
+
+                    # direct activities_summary if present
+                    activities_summary_direct = None
+                    if activities_summary_col is not None:
+                        sv = row.get(activities_summary_col)
+                        activities_summary_direct = None if pd.isna(sv) else str(sv)
+
+                    # structured activities JSON if present (rare)
+                    structured_acts: List[dict] = []
+                    if activities_json_col is not None:
+                        jv = row.get(activities_json_col)
+                        if isinstance(jv, str) and jv.strip():
+                            try:
+                                parsed = json.loads(jv)
+                                if isinstance(parsed, list):
+                                    structured_acts = parsed
+                            except Exception:
+                                structured_acts = []
+                        elif isinstance(jv, list):
+                            structured_acts = jv
+
+                    rec = {
+                        'user_id': user_id,
+                        'user_name': user_name,
+                        'current_city': current_city,
+                        'activities_summary': activities_summary_direct or "",
+                        'user_activities': structured_acts or [],
+                        '_segments': []  # internal aggregation for summary
+                    }
+                    grouped[user_id] = rec
+
+                # Per-row activity aggregation (long-form CSV)
+                club_name = None
+                if club_name_col is not None:
+                    cn = row.get(club_name_col)
+                    if cn is not None and not pd.isna(cn):
+                        club_name = str(cn)
+                club_id = None
+                if club_id_col is not None:
+                    cid = row.get(club_id_col)
+                    if cid is not None and not pd.isna(cid):
+                        club_id = str(cid)
+                activity = None
+                if activity_col is not None:
+                    ac = row.get(activity_col)
+                    if ac is not None and not pd.isna(ac):
+                        activity = str(ac)
+                act_city = None
+                if activity_city_col is not None:
+                    c2 = row.get(activity_city_col)
+                    if c2 is not None and not pd.isna(c2):
+                        act_city = str(c2)
+                # areas parse - handle PostgreSQL array format like [ "GCR Extn." ]
+                areas_list: List[str] = []
+                if areas_col is not None:
+                    av = row.get(areas_col)
+                    if isinstance(av, str) and av.strip():
+                        # Handle PostgreSQL array format: [ "GCR Extn." ]
+                        av_clean = av.strip()
+                        if av_clean == '[]':
+                            # Empty array
+                            areas_list = []
+                        elif av_clean.startswith('[') and av_clean.endswith(']'):
+                            try:
+                                # Try JSON parsing first
+                                parsed_areas = json.loads(av_clean)
+                                if isinstance(parsed_areas, list):
+                                    areas_list = [str(a).strip() for a in parsed_areas if a is not None]
+                                else:
+                                    areas_list = [str(av_clean)]
+                            except Exception:
+                                # If JSON parsing fails, try manual PostgreSQL array parsing
+                                try:
+                                    # Remove brackets and split by comma
+                                    inner = av_clean[1:-1].strip()
+                                    if inner:
+                                        # Split and clean each item
+                                        items = []
+                                        for item in inner.split(','):
+                                            item = item.strip()
+                                            # Remove quotes if present
+                                            if (item.startswith('"') and item.endswith('"')) or (item.startswith("'") and item.endswith("'")):
+                                                item = item[1:-1]
+                                            if item:
+                                                items.append(item)
+                                        areas_list = items
+                                    else:
+                                        areas_list = []
+                                except Exception:
+                                    areas_list = [str(av_clean)]
+                        else:
+                            # Not array format, treat as single item
+                            areas_list = [str(av_clean)]
+                    elif isinstance(av, list):
+                        areas_list = [str(a) for a in av if a is not None]
+                    
+                    if processed_rows <= 3:  # Debug log for first few rows
+                        print(f"🔧 DEBUG: Row {idx}: areas raw='{av}' -> parsed={areas_list}", flush=True)
+                # attended
+                attended_val = None
+                if meetup_attended_col is not None:
+                    mv = row.get(meetup_attended_col)
+                    try:
+                        attended_val = int(mv) if mv is not None and not pd.isna(mv) else None
+                    except Exception:
+                        attended_val = None
+
+                # Handle different cases for club data
+                if club_id and club_id.lower() not in ['null', 'none', ''] and club_name and club_name.lower() not in ['null', 'none', '']:
+                    # Valid club data - add activity entry
+                    activity_entry = {
+                        'club_id': club_id or "",
+                        'club_name': club_name or "",
+                        'activity': activity or "",
+                        'city': act_city or (rec.get('current_city') or ""),
+                        'area': areas_list,
+                        'meetup_attended': attended_val if attended_val is not None else ""
+                    }
+                    rec['user_activities'].append(activity_entry)
+                    # Build segment for summary
+                    areas_text = ", ".join(areas_list) if areas_list else ""
+                    seg = f"{activity_entry['club_name']}|{activity_entry['activity']}|{activity_entry['city']}|{areas_text}|{activity_entry['meetup_attended']}"
+                    rec['_segments'].append(seg)
+                    
+                    if processed_rows <= 3:
+                        print(f"🔧 DEBUG: Row {idx}: Added activity for user {user_id}: {activity_entry['club_name']}", flush=True)
+                elif processed_rows <= 3:
+                    # User has no valid club data - this is OK, just log it
+                    print(f"🔧 DEBUG: Row {idx}: User {user_id} has no valid club data (club_id='{club_id}', club_name='{club_name}')", flush=True)
+
+            # Finalize records from grouped dict
+            records: List[dict] = []
+            print(f"🔧 DEBUG: Finalizing records from {len(grouped)} grouped users", flush=True)
+            
+            for user_id, rec in grouped.items():
+                if not rec.get('activities_summary') and rec.get('_segments'):
+                    rec['activities_summary'] = " ; ".join([s for s in rec['_segments'] if s])
+                rec.pop('_segments', None)
+                records.append(rec)
+                
+                if len(records) <= 3:  # Only log first few records
+                    print(f"🔧 DEBUG: User {user_id} record: {rec}", flush=True)
+            
+            print(f"🔧 DEBUG: Processing summary:", flush=True)
+            print(f"  Total rows processed: {processed_rows}", flush=True)
+            print(f"  Rows skipped: {skipped_rows}", flush=True)
+            print(f"  Final records created: {len(records)}", flush=True)
+
+            if not records:
+                print("❌ DEBUG: No valid records found to import from DataFrame", flush=True)
+                return 0
+            
+            print(f"🔧 DEBUG: Calling add_user_preferences_batch with {len(records)} records", flush=True)
+            ok = self.chroma_manager.add_user_preferences_batch(records, clear_existing=False)
+            print(f"🔧 DEBUG: add_user_preferences_batch returned: {ok}", flush=True)
+            
+            return len(records) if ok else 0
+        except Exception as e:
+            print(f"❌ Error importing user preferences from DataFrame: {e}", flush=True)
+            return 0
+
+    def import_user_preferences_from_csv_path(self, csv_path: str) -> int:
+        """Import user preferences from a CSV file path and upsert into ChromaDB."""
+        try:
+            if not csv_path or not os.path.exists(csv_path):
+                print(f"❌ CSV path not found: {csv_path}", flush=True)
+                return 0
+            print(f"🔧 DEBUG: Reading CSV file: {csv_path}", flush=True)
+            # Use encoding='utf-8-sig' to handle BOM character properly
+            df = pd.read_csv(csv_path, encoding='utf-8-sig')
+            return self.import_user_preferences_from_dataframe(df)
+        except Exception as e:
+            print(f"❌ Error reading CSV at {csv_path}: {e}", flush=True)
+            return 0
+
+    def prompt_and_import_csv_interactive(self) -> int:
+        """Prompt user to upload or provide path to CSV and import user preferences."""
+        try:
+            # Prefer Colab's upload UI if available
+            try:
+                from google.colab import files as colab_files  # type: ignore
+                print("📤 Please upload a CSV file with user preferences...", flush=True)
+                uploaded = colab_files.upload()
+                if uploaded:
+                    name = next(iter(uploaded.keys()))
+                    data = uploaded[name]
+                    df = pd.read_csv(io.BytesIO(data))
+                    count = self.import_user_preferences_from_dataframe(df)
+                    print(f"✅ Imported {count} user preferences from uploaded CSV", flush=True)
+                    return count
+            except Exception:
+                # Not in Colab or upload failed; fall back to path prompt
+                pass
+
+            try:
+                path = input("Enter CSV path to import user preferences (or press Enter to skip): ").strip()
+            except Exception:
+                path = ""
+            if not path:
+                print("ℹ️ CSV import skipped", flush=True)
+                return 0
+            count = self.import_user_preferences_from_csv_path(path)
+            if count > 0:
+                print(f"✅ Imported {count} user preferences from {path}", flush=True)
+            return count
+        except Exception as e:
+            print(f"❌ Error during interactive CSV import: {e}", flush=True)
+            return 0
 
 class MeetupBot:
     def __init__(self):
@@ -1238,10 +1481,12 @@ Instructions:
    - 1–2 line description focused on fit
    - Registration URL
 4. If nothing is a direct match, provide reasonable alternatives (nearby dates/areas/categories) and tips to refine the search.
-5. If the user provides a user_id, FIRST retrieve their preferences from the user_preferences collection and tailor recommendations accordingly. If no preferences are found for that user_id, explicitly state that user preferences were not found and proceed with general recommendations; invite the user to share their preferences.
-6. Be concise, friendly, and helpful. Use a few tasteful emojis.
-7. Never invent facts. If a field is missing, say “N/A”.
-8. Prefer recent/upcoming events over past ones.
+5. If the user provides a user_id, FIRST retrieve their preferences from the user_preferences collection and tailor recommendations accordingly. If there is no user preference data avilable first ask the user to share their preferences. ask what are thier hobbies and intrestes and based on that then recommend them the meetups after the user share their preferences.
+6. And user has himself provided the suggestion and preferences then repeat instruction no 1,2 and 3 based on his input.
+7. Be concise, friendly, and helpful. Use a few tasteful emojis.
+8. Never invent facts. If a field is missing, say “N/A”.
+9. Prefer recent/upcoming events over past ones.
+10. Always retrive the data of events from the vector database only with consise information about the all the fields. And the registration url should be perfectally fetched from the database and exact. 
 
 Current user message: {user_message}"""
         return system_prompt
@@ -1401,21 +1646,33 @@ try:
     print(f"🔧 Debug: User preferences info: {user_prefs_info}")
     existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
     print(f"🔧 Debug: Existing user preferences count: {existing_user_prefs}")
+    
     if existing_user_prefs == 0:
-        print("ℹ️ No user preferences found. You can run: bot.sync_user_preferences_once(clear_existing=False)")
-        # Run quick diagnostics to help identify setup issues
+        print("ℹ️ No user preferences found.")
+        # Diagnostics
         bot.chroma_manager.validate_user_prefs_setup()
-        # Try a single API page fetch to verify connectivity and payload
-        try:
-            print("🔌 Probing user preferences API for one page...", flush=True)
-            tmp_mgr = bot.user_pref_sync_manager
-            prefs, next_cursor = tmp_mgr.fetch_user_preferences_page(cursor=0)
-            print(f"🧪 Probe result: received={len(prefs)} next_cursor={next_cursor}", flush=True)
-            if prefs:
-                print("▶️ Auto-running initial user preferences sync now...", flush=True)
-                bot.sync_user_preferences_once(clear_existing=False)
-        except Exception as e:
-            print(f"❌ Probe call failed: {e}", flush=True)
+    else:
+        print(f"✅ Found {existing_user_prefs} existing user preferences in ChromaDB!")
+    
+    # Always offer CSV import option
+    print("\n📥 CSV Import Options:")
+    print("You can import user preferences from CSV file:")
+    print("- Upload a new CSV file")
+    print("- Replace existing preferences")
+    print("- Add to existing preferences")
+    
+    try:
+        tmp_mgr = bot.user_pref_sync_manager
+        imported = tmp_mgr.prompt_and_import_csv_interactive()
+        if imported > 0:
+            print(f"✅ Imported {imported} user preferences from CSV", flush=True)
+            user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
+            existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
+            print(f"🔧 Debug: Total user preferences count after CSV import: {existing_user_prefs}")
+        else:
+            print("ℹ️ No CSV import performed.")
+    except Exception as e:
+        print(f"❌ CSV import attempt failed: {e}", flush=True)
 except Exception as e:
     print(f"❌ Error checking user preferences: {e}")
 
@@ -1437,6 +1694,11 @@ if existing_events > 0:
     print("4. bot.sync_events_once() - Run single sync")
     print("\nCurrently using regular mode. To enable periodic sync, call:")
     print("bot.start_with_sync(2)  # for 2-minute intervals")
+    
+    print("\n📋 User Preferences CSV Import Methods:")
+    print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")
+    print("• bot.user_pref_sync_manager.prompt_and_import_csv_interactive()") 
+    print("• bot.user_pref_sync_manager.import_user_preferences_from_dataframe(df)")
 
     bot.start_conversation()
 else:
