@@ -3,7 +3,7 @@
 from pickle import FALSE
 import subprocess
 import sys
-import chromadb.utils.embedding_functions
+# import chromadb.utils.embedding_functions
 
 def install_package(package):
     """Install a package if not already installed"""
@@ -17,7 +17,7 @@ def install_package(package):
 
 # Install all required packages
 print("🔧 Installing required packages...")
-packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "requests"]
+packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "requests", "sentence-transformers"]
 for package in packages:
     install_package(package)
 
@@ -151,6 +151,10 @@ class ChromaDBManager:
         self.collection_name = "meetup_events"
         self.collection = self._initialize_collection()
 
+        # Initialize user preferences collection
+        self.user_prefs_collection_name = "user_preferences"
+        self.user_prefs_collection = self._initialize_user_prefs_collection()
+
     def _initialize_collection(self):
         """Initialize or get the events collection with embedding function"""
         print(f"🔧 Setting up collection: {self.collection_name}")
@@ -166,6 +170,21 @@ class ChromaDBManager:
             return collection
         except Exception as e:
             print(f"❌ Failed to initialize collection: {e}")
+            raise
+
+    def _initialize_user_prefs_collection(self):
+        """Initialize or get the user preferences collection with embedding function"""
+        print(f"🔧 Setting up collection: {self.user_prefs_collection_name}")
+        try:
+            collection = self.client.get_or_create_collection(
+                name=self.user_prefs_collection_name,
+                metadata={"description": "User preferences and past activities for recommendations"},
+                embedding_function=self.embedding_function
+            )
+            print(f"✅ User preferences collection ready with {collection.count()} items")
+            return collection
+        except Exception as e:
+            print(f"❌ Failed to initialize user preferences collection: {e}")
             raise
 
     def prepare_event_text(self, event_data: dict) -> str:
@@ -289,11 +308,13 @@ class ChromaDBManager:
          batch_size = 100
          for i in range(0, len(documents), batch_size):
                try:
+                  print(f"📦 Adding events batch {i//batch_size + 1} with {len(documents[i:i+batch_size])} items")
                   self.collection.add(
                      documents=documents[i:i+batch_size],
                      metadatas=metadatas[i:i+batch_size],
                      ids=ids[i:i+batch_size]
                   )
+                  print(f"✅ Added events batch {i//batch_size + 1}")
                except Exception as e:
                   print(f"❌ Failed to add batch {i//batch_size}: {str(e)}")
                   # Try to continue with remaining batches
@@ -305,6 +326,170 @@ class ChromaDBManager:
       except Exception as e:
          print(f"❌ Critical error in add_events_batch: {str(e)}")
          return False
+
+    def _extract_user_id(self, pref: dict) -> str:
+        """Best-effort extraction of user id from preference object"""
+        for key in ["user_id", "userId", "id", "uid", "_id"]:
+            if key in pref and pref[key] not in [None, ""]:
+                return str(pref[key])
+        return str(uuid.uuid4())
+
+    def _stringify_value(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join([self._stringify_value(v) for v in value if v is not None])
+        if isinstance(value, dict):
+            parts = []
+            for k, v in value.items():
+                sv = self._stringify_value(v)
+                if sv:
+                    parts.append(f"{k}: {sv}")
+            return "; ".join(parts)
+        return str(value)
+
+    def prepare_user_pref_text(self, pref: dict) -> str:
+        """Convert a user preference record (GetUserPreferencesResponse.UserPreferences) to searchable text."""
+        try:
+            user_id = self._extract_user_id(pref)
+            user_name = pref.get("user_name") or pref.get("username") or pref.get("name") or ""
+            current_city = pref.get("current_city") or pref.get("city") or ""
+
+            # Prepare activities text from repeated UserActivityPreference
+            activities = pref.get("user_activities") or []
+            activities_texts = []
+            if isinstance(activities, list):
+                for act in activities:
+                    if not isinstance(act, dict):
+                        continue
+                    club_id = act.get("club_id", "")
+                    club_name = act.get("club_name", "")
+                    activity = act.get("activity", "")
+                    act_city = act.get("city", "")
+                    areas = act.get("area", [])
+                    if isinstance(areas, list):
+                        areas_text = ", ".join([self._stringify_value(a) for a in areas if a is not None])
+                    else:
+                        areas_text = self._stringify_value(areas)
+                    attended = act.get("meetup_attended", "")
+                    segment = f"{club_name} ({club_id}) | Activity: {activity} | City: {act_city} | Areas: {areas_text} | Attended: {attended}"
+                    activities_texts.append(segment)
+
+            parts = [f"User: {user_id}"]
+            if user_name:
+                parts.append(f"Name: {user_name}")
+            if current_city:
+                parts.append(f"Current City: {current_city}")
+            if activities_texts:
+                parts.append("Activities: " + " || ".join(activities_texts))
+
+            # Fallback if nothing substantial present
+            if len(parts) <= 1:
+                fallback_fields = []
+                for k, v in pref.items():
+                    if isinstance(v, (str, int, float)):
+                        fallback_fields.append(f"{k}: {v}")
+                if fallback_fields:
+                    parts.extend(fallback_fields[:10])
+            return " | ".join(parts)
+        except Exception:
+            return self._stringify_value(pref)
+
+    def add_user_preferences_batch(self, preferences: List[dict], clear_existing: bool = False) -> bool:
+        """Add or update a batch of user preferences into the user_preferences collection."""
+        try:
+            print(f"🔄 add_user_preferences_batch called with {len(preferences) if preferences else 0} items (clear_existing={clear_existing})", flush=True)
+            if clear_existing:
+                try:
+                    existing_items = self.user_prefs_collection.get()
+                    ids_to_delete = existing_items.get("ids", [])
+                    if ids_to_delete:
+                        batch_size = 200
+                        for i in range(0, len(ids_to_delete), batch_size):
+                            batch_ids = ids_to_delete[i:i + batch_size]
+                            self.user_prefs_collection.delete(ids=batch_ids)
+                        print(f"🗑️ Deleted {len(ids_to_delete)} old user preferences")
+                    else:
+                        print("ℹ️ No existing user preferences to delete")
+                except Exception as e:
+                    print(f"❌ Error clearing user preferences: {e}")
+                    return False
+
+            if not preferences:
+                print("ℹ️ No user preferences to add")
+                return True
+
+            documents = []
+            metadatas = []
+            ids = []
+            for pref in preferences:
+                if not isinstance(pref, dict):
+                    continue
+                user_id = self._extract_user_id(pref)
+                doc_text = self.prepare_user_pref_text(pref)
+
+                # Flatten metadata to only primitive types
+                user_name = str(pref.get("user_name") or pref.get("username") or pref.get("name") or "")
+                current_city = str(pref.get("current_city") or pref.get("city") or "")
+                activities = pref.get("user_activities") or []
+                activities_texts = []
+                if isinstance(activities, list):
+                    for act in activities:
+                        if not isinstance(act, dict):
+                            continue
+                        club_name = act.get("club_name", "")
+                        activity = act.get("activity", "")
+                        act_city = act.get("city", "")
+                        areas = act.get("area", [])
+                        if isinstance(areas, list):
+                            areas_text = ", ".join([self._stringify_value(a) for a in areas if a is not None])
+                        else:
+                            areas_text = self._stringify_value(areas)
+                        attended = act.get("meetup_attended", "")
+                        activities_texts.append(f"{club_name}|{activity}|{act_city}|{areas_text}|{attended}")
+                activities_summary = " ; ".join(activities_texts)
+
+                metadata = {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "current_city": current_city,
+                    "activities_summary": activities_summary
+                }
+                # Ensure all metadata values are primitives
+                cleaned_metadata = {}
+                for k, v in metadata.items():
+                    if isinstance(v, (str, int, float, bool)) or v is None:
+                        cleaned_metadata[k] = v
+                    else:
+                        cleaned_metadata[k] = str(v)
+
+                documents.append(doc_text)
+                metadatas.append(cleaned_metadata)
+                ids.append(user_id)
+
+            added_count = 0
+            batch_size = 200
+            for i in range(0, len(documents), batch_size):
+                batch_docs = documents[i:i+batch_size]
+                batch_meta = metadatas[i:i+batch_size]
+                batch_ids = ids[i:i+batch_size]
+                try:
+                    print(f"📦 Adding user prefs batch {i//batch_size + 1} with {len(batch_docs)} items", flush=True)
+                    self.user_prefs_collection.add(
+                        documents=batch_docs,
+                        metadatas=batch_meta,
+                        ids=batch_ids
+                    )
+                    added_count += len(batch_docs)
+                    print(f"✅ Added user prefs batch {i//batch_size + 1}", flush=True)
+                except Exception as e:
+                    print(f"❌ Failed to add user prefs batch {i//batch_size}: {str(e)}", flush=True)
+                    continue
+            print(f"✅ Added/updated {added_count} user preferences to ChromaDB", flush=True)
+            return added_count > 0
+        except Exception as e:
+            print(f"❌ Critical error in add_user_preferences_batch: {str(e)}")
+            return False
 
     def search_events(self, query: str, n_results: int = 5, filters: dict = None) -> List[dict]:
         """
@@ -484,6 +669,75 @@ class ChromaDBManager:
             lines.append(f"🗺️ **Location Map**: {event['location_url']}")
 
         return "\n".join(lines)
+
+    def get_user_prefs_stats(self) -> dict:
+        """Get statistics about the user preferences collection"""
+        try:
+            count = self.user_prefs_collection.count()
+            return {
+                "collection_name": self.user_prefs_collection_name,
+                "total_user_preferences": count,
+                "persist_directory": self.persist_directory,
+                "last_updated": datetime.now().isoformat()
+            }
+        except Exception as e:
+            print(f"❌ Error getting user preferences stats: {e}")
+            return {}
+
+    def get_user_preferences_by_user_id(self, user_id: str) -> Optional[dict]:
+        """Fetch a single user's preferences from the user_preferences collection by user_id."""
+        try:
+            if not user_id:
+                return None
+            res = self.user_prefs_collection.get(ids=[str(user_id)])
+            if not res:
+                return None
+            ids = res.get("ids") or []
+            metas = res.get("metadatas") or []
+            docs = res.get("documents") or []
+            if ids and len(ids) > 0:
+                return {
+                    "id": ids[0],
+                    "metadata": metas[0] if metas else {},
+                    "document": docs[0] if docs else ""
+                }
+            return None
+        except Exception as e:
+            print(f"❌ Error fetching user preferences for user_id={user_id}: {e}")
+            return None
+
+    def get_embedding_function_info(self) -> dict:
+        try:
+            ef = self.embedding_function
+            model_name = getattr(ef, "model_name", None)
+            return {
+                "type": type(ef).__name__,
+                "model_name": model_name
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def validate_user_prefs_setup(self):
+        """Print diagnostics helpful for fixing user preferences initialization issues."""
+        try:
+            print("🔎 Validating user preferences setup...", flush=True)
+            print(f"📁 Persist dir: {self.persist_directory}", flush=True)
+            print(f"🗂️ Events collection: {self.collection_name}", flush=True)
+            print(f"🗂️ User prefs collection: {self.user_prefs_collection_name}", flush=True)
+            print(f"🧠 Embedding function: {self.get_embedding_function_info()}", flush=True)
+            # Try basic calls
+            try:
+                cnt = self.user_prefs_collection.count()
+                print(f"🔢 User prefs collection count(): {cnt}", flush=True)
+            except Exception as e:
+                print(f"❌ Error calling count() on user prefs: {e}", flush=True)
+            try:
+                _ = self.user_prefs_collection.get(limit=1)
+                print("✅ user_prefs_collection.get(limit=1) succeeded", flush=True)
+            except Exception as e:
+                print(f"❌ Error calling get() on user prefs: {e}", flush=True)
+        except Exception as e:
+            print(f"❌ validate_user_prefs_setup failed: {e}", flush=True)
 
 class EventSyncManager:
     def __init__(self, chroma_manager: ChromaDBManager):
@@ -667,12 +921,177 @@ class EventSyncManager:
             self.run_single_sync()
             time.sleep(interval_minutes * 60)
 
+class UserPreferenceSyncManager:
+    def __init__(self, chroma_manager: ChromaDBManager, page_limit: int = 2000):
+        self.api_url = "https://notify.misfits.net.in/api/user/preferences"
+        self.chroma_manager = chroma_manager
+        self.page_limit = page_limit
+        self.is_running = False
+        self.sync_thread = None
+
+    def _extract_list_from_response(self, data) -> List[dict]:
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            for key in ["user_preferences", "preferences", "data", "users", "items", "results", "list"]:
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def fetch_user_preferences_page(self, cursor: int) -> tuple:
+        try:
+            print(f"🔄 Fetching user preferences with cursor={cursor} (pageLimit={self.page_limit})", flush=True)
+            payload = {
+                "filterOptions": {
+                    "cursor": cursor,
+                    "offset": 0,
+                    "pageLimit": self.page_limit,
+                    "searchText": ""
+                }
+            }
+            headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            response = requests.post(self.api_url, json=payload, headers=headers, timeout=60)
+            if response.status_code != 200:
+                print(f"❌ User preferences API failed with status {response.status_code}", flush=True)
+                return [], None
+            data = response.json()
+            prefs = self._extract_list_from_response(data)
+            if not prefs:
+                print("ℹ️ No user preferences returned for this page", flush=True)
+                return [], None
+            # Determine next_cursor as the highest numeric user id in this page
+            next_cursor = None
+            max_numeric_id = None
+            for item in prefs:
+                if not isinstance(item, dict):
+                    continue
+                for key in ["user_id", "userId", "id", "uid", "_id"]:
+                    if key in item and item[key] not in [None, ""]:
+                        try:
+                            candidate = int(item[key])
+                        except Exception:
+                            try:
+                                candidate = int(str(item[key]).strip().split("-")[-1])
+                            except Exception:
+                                candidate = None
+                        if candidate is not None:
+                            if max_numeric_id is None or candidate > max_numeric_id:
+                                max_numeric_id = candidate
+                        break
+            next_cursor = max_numeric_id
+            return prefs, next_cursor
+        except Exception as e:
+            print(f"❌ Error fetching user preferences: {e}")
+            return [], None
+
+    def run_full_sync(self, clear_existing: bool = False):
+        try:
+            print("🚀 Starting full user preferences sync...", flush=True)
+            cursor = 0
+            seen_cursors = set()
+            first_batch = True
+            total = 0
+            processed_ids = set()
+            while True:
+                if cursor in seen_cursors:
+                    print("⚠️ Cursor repetition detected; incrementing to avoid loop", flush=True)
+                    cursor += 1
+                seen_cursors.add(cursor)
+                prefs, next_cursor = self.fetch_user_preferences_page(cursor)
+                if not prefs:
+                    print("✅ Completed user preferences sync (no more data)")
+                    break
+                print(f"📄 Retrieved {len(prefs)} user preferences; page_next_cursor={next_cursor}", flush=True)
+
+                # Deduplicate within this run
+                filtered = []
+                page_ids_int = []
+                for p in prefs:
+                    try:
+                        uid_str = self.chroma_manager._extract_user_id(p)
+                        uid_int = int(uid_str)
+                        page_ids_int.append(uid_int)
+                        if uid_str not in processed_ids:
+                            filtered.append(p)
+                            processed_ids.add(uid_str)
+                    except Exception:
+                        continue
+
+                success = self.chroma_manager.add_user_preferences_batch(
+                    filtered,
+                    clear_existing=clear_existing and first_batch
+                )
+                first_batch = False
+                if not success:
+                    print("❌ Failed to upsert user preferences for current page, continuing", flush=True)
+                total += len(filtered)
+                # Advance cursor using the highest user_id from this page
+                if page_ids_int:
+                    page_max = max(page_ids_int)
+                    new_cursor = page_max
+                else:
+                    new_cursor = next_cursor
+
+                if new_cursor is None:
+                    print("ℹ️ No valid next cursor returned; stopping.", flush=True)
+                    break
+
+                if new_cursor <= cursor:
+                    print(f"↪️ Non-advancing cursor detected ({new_cursor} <= {cursor}); incrementing by 1", flush=True)
+                    new_cursor = cursor + 1
+
+                print(f"↪️ Advancing cursor: {cursor} -> {new_cursor}", flush=True)
+                cursor = new_cursor
+            print(f"✅ User preferences sync finished. Total records processed: {total}", flush=True)
+            try:
+                cnt = self.chroma_manager.user_prefs_collection.count()
+                print(f"📊 User preferences collection count now: {cnt}", flush=True)
+            except Exception as e:
+                print(f"⚠️ Could not read user prefs count: {e}", flush=True)
+        except Exception as e:
+            print(f"❌ Error during user preferences sync: {e}")
+
+    def start_periodic_sync(self, interval_hours: int = 24, clear_existing_first_run: bool = False):
+        """Start periodic synchronization, defaulting to once per day."""
+        if self.is_running:
+            print("⚠️ User preferences sync is already running")
+            return
+        self.is_running = True
+        def _loop():
+            first = True
+            while self.is_running:
+                try:
+                    self.run_full_sync(clear_existing=clear_existing_first_run and first)
+                except Exception as e:
+                    print(f"❌ Error in periodic user preferences sync: {e}")
+                first = False
+                sleep_seconds = max(1, int(interval_hours * 3600))
+                for _ in range(sleep_seconds):
+                    if not self.is_running:
+                        break
+                    time.sleep(1)
+        self.sync_thread = threading.Thread(target=_loop, daemon=True)
+        self.sync_thread.start()
+        print(f"🔄 Started user preferences periodic sync every {interval_hours} hours")
+
+    def stop_periodic_sync(self):
+        """Stop periodic synchronization"""
+        self.is_running = False
+        if self.sync_thread and self.sync_thread.is_alive():
+            self.sync_thread.join()
+        print("🛑 Stopped user preferences periodic sync")
+
 class MeetupBot:
     def __init__(self):
         self.events_data = None
         self.conversation_history = []
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
+        self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
 
     def search_events_vector(self, query: str, n_results: int = 5):
         """Search events using ChromaDB vector search"""
@@ -736,6 +1155,30 @@ class MeetupBot:
 
     def prepare_context(self, user_message):
         """Prepare context with dataset information for the AI model"""
+        # Optional: detect a user_id in the message to personalize recommendations
+        user_pref_context = ""
+        try:
+            import re
+            # Heuristic: look for patterns like user_id: 123 or uid 123 or just a long number token
+            id_match = re.search(r"(?:user[_ ]?id|uid|id)\D*(\d{3,})", user_message, flags=re.IGNORECASE)
+            if not id_match:
+                # fallback: a standalone 5+ digit number
+                id_match = re.search(r"\b(\d{5,})\b", user_message)
+            if id_match:
+                uid = id_match.group(1)
+                pref = self.chroma_manager.get_user_preferences_by_user_id(uid)
+                if pref:
+                    md = pref.get("metadata", {}) or {}
+                    user_pref_context = (
+                        "\nUser Preference Context (from user_preferences):\n"
+                        f"- user_id: {pref.get('id', uid)}\n"
+                        f"- user_name: {md.get('user_name', 'N/A')}\n"
+                        f"- current_city: {md.get('current_city', 'N/A')}\n"
+                        f"- activities_summary: {md.get('activities_summary', 'N/A')}\n"
+                    )
+        except Exception:
+            pass
+
         # Get relevant events from vector search
         relevant_events = self.search_events_vector(user_message, n_results=10)
 
@@ -759,27 +1202,28 @@ class MeetupBot:
         for msg in self.conversation_history[-6:]:
             history_context += f"{msg['role']}: {msg['content']}\n"
 
-        system_prompt = f"""You are a friendly meetup recommendation bot with access to event data. Your role is to help users find events and activities based on their preferences.
+        system_prompt = f"""You are an expert, friendly meetup recommendation assistant. You have access to a vector database of events and must recommend the most relevant options based on the user's interests and constraints.
 
 {events_context}
 {history_context}
+{user_pref_context}
 
-Guidelines:
-1. Analyze the user's request and recommend relevant events
-2. Highlight key details like date/time, location, price, and availability
-3. Always respond in a conversational, friendly tone
-4. When showing events, include:
-   - Event name and club
+Instructions:
+1. First, interpret the user's intent (activity, date/time, budget, location, group size, preferences).
+2. Return 3–7 strong, diverse options, ordered by likely relevance.
+3. For each event, ALWAYS include:
+   - Name and organizing club
    - Activity type
-   - Date & Time
+   - Date and time (local)
    - Location (venue, area, city)
    - Price and available spots
-   - Brief description
+   - 1–2 line description focused on fit
    - Registration URL
-5. If no events match, suggest alternatives
-6. Mention payment terms clearly
-7. Use emojis to make responses more engaging
-8. Keep responses helpful and personalized
+4. If nothing is a direct match, provide reasonable alternatives (nearby dates/areas/categories) and tips to refine the search.
+5. If the user provides a user_id, FIRST retrieve their preferences from the user_preferences collection and tailor recommendations accordingly.
+6. Be concise, friendly, and helpful. Use a few tasteful emojis.
+7. Never invent facts. If a field is missing, say “N/A”.
+8. Prefer recent/upcoming events over past ones.
 
 Current user message: {user_message}"""
         return system_prompt
@@ -868,6 +1312,18 @@ Current user message: {user_message}"""
         """Run a single event synchronization cycle"""
         self.event_sync_manager.run_single_sync()
 
+    def sync_user_preferences_once(self, clear_existing: bool = False):
+        """Run a full user preferences synchronization cycle using cursor pagination"""
+        self.user_pref_sync_manager.run_full_sync(clear_existing=clear_existing)
+
+    def start_user_preferences_daily_sync(self, clear_existing_first_run: bool = False):
+        """Start daily user preferences sync (every 24 hours)."""
+        self.user_pref_sync_manager.start_periodic_sync(interval_hours=24, clear_existing_first_run=clear_existing_first_run)
+
+    def stop_user_preferences_sync(self):
+        """Stop user preferences periodic sync."""
+        self.user_pref_sync_manager.stop_periodic_sync()
+
     def start_with_sync(self, sync_interval_minutes: int = 2):
         """Start the bot with automatic event synchronization"""
         # Start event synchronization in background
@@ -919,6 +1375,31 @@ else:
             print("❌ Still no events found after sync. Please check API connection.")
     except Exception as e:
         print(f"❌ Error checking collection after sync: {e}")
+
+# Check user preferences collection as well
+print("\n📁 Step 1b: Checking user preferences data...")
+try:
+    user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
+    print(f"🔧 Debug: User preferences info: {user_prefs_info}")
+    existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
+    print(f"🔧 Debug: Existing user preferences count: {existing_user_prefs}")
+    if existing_user_prefs == 0:
+        print("ℹ️ No user preferences found. You can run: bot.sync_user_preferences_once(clear_existing=False)")
+        # Run quick diagnostics to help identify setup issues
+        bot.chroma_manager.validate_user_prefs_setup()
+        # Try a single API page fetch to verify connectivity and payload
+        try:
+            print("🔌 Probing user preferences API for one page...", flush=True)
+            tmp_mgr = bot.user_pref_sync_manager
+            prefs, next_cursor = tmp_mgr.fetch_user_preferences_page(cursor=0)
+            print(f"🧪 Probe result: received={len(prefs)} next_cursor={next_cursor}", flush=True)
+            if prefs:
+                print("▶️ Auto-running initial user preferences sync now...", flush=True)
+                bot.sync_user_preferences_once(clear_existing=False)
+        except Exception as e:
+            print(f"❌ Probe call failed: {e}", flush=True)
+except Exception as e:
+    print(f"❌ Error checking user preferences: {e}")
 
 if existing_events > 0:
     print("\n🎉 Great! Event data ready.")
