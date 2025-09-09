@@ -9,9 +9,6 @@ services:
       - PYTHONUNBUFFERED=1
       - CHROMA_HOST=43.205.192.16
       - CHROMA_PORT=8000
-    volumes:
-      # Mount local ChromaDB data directory if using local storage
-      - ./chroma_data:/app/chroma_data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/liveness"]
       interval: 30s

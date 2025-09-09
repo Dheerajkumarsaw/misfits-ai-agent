@@ -17,8 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY live-chorma.py .
 COPY api_server.py .
 
-# Create directory for ChromaDB data (if needed)
-RUN mkdir -p /app/chroma_data
 
 # Set environment variables
 ENV PYTHONPATH=/app
