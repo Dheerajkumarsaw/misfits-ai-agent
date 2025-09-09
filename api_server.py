@@ -83,19 +83,22 @@ def get_bot():
         spec.loader.exec_module(live_chorma)
         MeetupBot = live_chorma.MeetupBot
         bot_instance = MeetupBot()
-        # Ensure initial sync has happened
-        collection_stats = bot_instance.chroma_manager.get_collection_stats()
-        if collection_stats.get('total_events', 0) == 0:
-            print("Running initial event sync...")
-            bot_instance.sync_events_once(full_sync=True)
+        # Skip initial sync during startup - let it happen on first request if needed
+        print("✅ Bot instance created successfully")
     return bot_instance
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize bot on startup"""
     print("🚀 Starting Meetup Recommendation API...")
-    bot = get_bot()
-    print(f"✅ Bot initialized with {bot.chroma_manager.get_collection_stats().get('total_events', 0)} events")
+    try:
+        bot = get_bot()
+        stats = bot.chroma_manager.get_collection_stats()
+        print(f"✅ Bot initialized with {stats.get('total_events', 0)} events")
+    except Exception as e:
+        print(f"⚠️  Warning: Bot initialization failed: {str(e)}")
+        print("⚠️  API will start but may not function properly until bot is initialized")
+        # Don't fail startup - let the API start and handle errors per request
 
 @app.get("/")
 async def root():
