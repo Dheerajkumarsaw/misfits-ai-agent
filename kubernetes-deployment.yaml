@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meetup-bot-api
+  labels:
+    app: meetup-bot
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: meetup-bot
+  template:
+    metadata:
+      labels:
+        app: meetup-bot
+    spec:
+      containers:
+      - name: meetup-bot-api
+        image: meetup-bot:latest  # Replace with your image registry
+        ports:
+        - containerPort: 8000
+        env:
+        - name: CHROMA_HOST
+          value: "chromadb.misfits.net.in"
+        - name: CHROMA_PORT
+          value: "8000"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health/liveness
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health/readiness
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: meetup-bot-service
+spec:
+  selector:
+    app: meetup-bot
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: LoadBalancer
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: meetup-bot-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: meetup-bot-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
