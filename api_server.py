@@ -78,7 +78,7 @@ def get_bot():
     global bot_instance
     if bot_instance is None:
         import importlib.util
-        spec = importlib.util.spec_from_file_location("live_chorma", "/app/live-chorma.py")
+        spec = importlib.util.spec_from_file_location("live_chorma", os.path.join(os.path.dirname(__file__), "live-chorma.py"))
         live_chorma = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(live_chorma)
         MeetupBot = live_chorma.MeetupBot
