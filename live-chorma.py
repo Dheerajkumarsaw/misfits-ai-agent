@@ -49,31 +49,33 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 # Initialize the NVIDIA API client
+import os
+
+# Clear any proxy-related environment variables that might interfere
+for key in list(os.environ.keys()):
+    if 'PROXY' in key.upper() or 'HTTP_PROXY' in key.upper() or 'HTTPS_PROXY' in key.upper():
+        del os.environ[key]
+
 try:
-    # Only pass the essential parameters to avoid unexpected kwargs
-    client = OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key="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"
-    )
+    # Set base URL via environment variable
+    os.environ['OPENAI_BASE_URL'] = "https://integrate.api.nvidia.com/v1"
+    os.environ['OPENAI_API_KEY'] = "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"
+    
+    # Initialize with minimal parameters
+    client = OpenAI()
     print("✅ OpenAI client initialized successfully")
-except TypeError as te:
-    # Handle potential parameter mismatch
-    print(f"⚠️ OpenAI client initialization failed (parameter issue): {te}")
+except Exception as e:
+    print(f"⚠️ OpenAI client initialization failed: {e}")
+    # Try with explicit parameters
     try:
-        # Try without base_url if there's a parameter issue
-        import os
-        os.environ['OPENAI_BASE_URL'] = "https://integrate.api.nvidia.com/v1"
         client = OpenAI(
-            api_key="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"
+            api_key="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",
+            base_url="https://integrate.api.nvidia.com/v1"
         )
-        print("✅ OpenAI client initialized with environment variable")
+        print("✅ OpenAI client initialized with explicit parameters")
     except Exception as e2:
         print(f"⚠️ OpenAI client initialization failed completely: {e2}")
         client = None
-except Exception as e:
-    print(f"⚠️ OpenAI client initialization failed: {e}")
-    # Create a dummy client that will fail gracefully
-    client = None
 
 # EventDetailsForAgent class to match the gRPC message structure
 class EventDetailsForAgent:
