@@ -77,7 +77,11 @@ def get_bot():
     """Get or create bot instance"""
     global bot_instance
     if bot_instance is None:
-        from live_chorma import MeetupBot
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("live_chorma", "/app/live-chorma.py")
+        live_chorma = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live_chorma)
+        MeetupBot = live_chorma.MeetupBot
         bot_instance = MeetupBot()
         # Ensure initial sync has happened
         collection_stats = bot_instance.chroma_manager.get_collection_stats()
