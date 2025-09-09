@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: meetup-bot-api
+  name: misfits-event-recommendation
   labels:
-    app: meetup-bot
+    app: misfits-event-recommendation
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: meetup-bot
+      app: misfits-event-recommendation
   template:
     metadata:
       labels:
-        app: meetup-bot
+        app: misfits-event-recommendation
     spec:
       containers:
-      - name: meetup-bot-api
-        image: meetup-bot:latest  # Replace with your image registry
+      - name: misfits-event-recommendation
+        image: dsaw1/misfits-event-recommendation:latest # Replace with your registry
         ports:
         - containerPort: 8000
         env:
@@ -47,25 +47,25 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: meetup-bot-service
+  name: misfits-event-recommendation-service
 spec:
   selector:
-    app: meetup-bot
+    app: misfits-event-recommendation
   ports:
     - protocol: TCP
-      port: 80
-      targetPort: 8000
+      port: 8001        # external port
+      targetPort: 8000  # internal container port
   type: LoadBalancer
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: meetup-bot-hpa
+  name: misfits-event-recommendation-hpa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: meetup-bot-api
+    name: misfits-event-recommendation
   minReplicas: 2
   maxReplicas: 10
   metrics:
