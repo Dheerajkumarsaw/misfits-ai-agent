@@ -257,7 +257,23 @@ class ChromaDBManager:
                 metadata={"description": "User preferences and past activities for recommendations"},
                 embedding_function=self.embedding_function
             )
-            print(f"✅ User preferences collection ready with {collection.count()} items")
+            
+            # Get unique user count
+            total_items = collection.count()
+            unique_users = 0
+            if total_items > 0:
+                try:
+                    all_data = collection.get()
+                    user_ids = set()
+                    for metadata in all_data.get('metadatas', []):
+                        if metadata and 'user_id' in metadata:
+                            user_ids.add(metadata['user_id'])
+                    unique_users = len(user_ids)
+                except:
+                    pass
+            
+            print(f"✅ User preferences collection ready with {total_items} items")
+            print(f"👥 Total unique users in database: {unique_users}")
             return collection
         except Exception as e:
             print(f"❌ Failed to initialize user preferences collection: {e}")
