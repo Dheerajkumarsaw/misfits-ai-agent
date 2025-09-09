@@ -15,13 +15,14 @@ def install_package(package):
         subprocess.check_call([sys.executable, "-m", "pip", "install", package])
         print(f"✅ {package} installed successfully")
 
-# Install all required packages
-print("🔧 Installing required packages...")
-packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "requests", "sentence-transformers"]
-for package in packages:
-    install_package(package)
-
-print("✅ All packages installed!")
+# Install all required packages - commented out for production
+# Package installation should be done via requirements.txt
+# print("🔧 Installing required packages...")
+# packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "requests", "sentence-transformers"]
+# for package in packages:
+#     install_package(package)
+# 
+# print("✅ All packages installed!")
 
 # Now import all required libraries
 import pandas as pd
@@ -49,11 +50,26 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Initialize the NVIDIA API client
 try:
+    # Only pass the essential parameters to avoid unexpected kwargs
     client = OpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
         api_key="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"
     )
     print("✅ OpenAI client initialized successfully")
+except TypeError as te:
+    # Handle potential parameter mismatch
+    print(f"⚠️ OpenAI client initialization failed (parameter issue): {te}")
+    try:
+        # Try without base_url if there's a parameter issue
+        import os
+        os.environ['OPENAI_BASE_URL'] = "https://integrate.api.nvidia.com/v1"
+        client = OpenAI(
+            api_key="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"
+        )
+        print("✅ OpenAI client initialized with environment variable")
+    except Exception as e2:
+        print(f"⚠️ OpenAI client initialization failed completely: {e2}")
+        client = None
 except Exception as e:
     print(f"⚠️ OpenAI client initialization failed: {e}")
     # Create a dummy client that will fail gracefully
@@ -146,17 +162,18 @@ class EventDetailsForAgent:
         }
 
 class ChromaDBManager:
-    def __init__(self, host: str = "43.205.192.16", port: int = 8000):
+    def __init__(self, host: str = None, port: int = None):
         """
         Initialize ChromaDB manager with SentenceTransformer embeddings
         
         Args:
-            host: ChromaDB server hostname
-            port: ChromaDB server port
+            host: ChromaDB server hostname (defaults to env CHROMA_HOST or 43.205.192.16)
+            port: ChromaDB server port (defaults to env CHROMA_PORT or 8000)
         """
-        self.host = host
-        self.port = port
-        print(f"🌐 Connecting to ChromaDB at: {host}:{port}")
+        import os
+        self.host = host or os.getenv('CHROMA_HOST', '43.205.192.16')
+        self.port = int(port or os.getenv('CHROMA_PORT', '8000'))
+        print(f"🌐 Connecting to ChromaDB at: {self.host}:{self.port}")
         
         # Initialize embedding function
         self.embedding_function = chromadb.utils.embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -164,7 +181,24 @@ class ChromaDBManager:
         )
         
         # Initialize ChromaDB client and collection
-        self.client = chromadb.HttpClient(host=host, port=port)
+        try:
+            # Try to connect with default settings
+            self.client = chromadb.HttpClient(host=self.host, port=self.port)
+        except Exception as e:
+            print(f"⚠️ Failed to connect with default settings: {e}")
+            # Try alternative connection method
+            try:
+                from chromadb.config import Settings
+                self.client = chromadb.Client(Settings(
+                    chroma_server_host=self.host,
+                    chroma_server_http_port=self.port,
+                    chroma_client_auth_provider="chromadb.auth.token.TokenAuthClientProvider",
+                    chroma_client_auth_credentials=""
+                ))
+                print("✅ Connected with alternative settings")
+            except Exception as e2:
+                print(f"⚠️ Alternative connection also failed: {e2}")
+                raise Exception(f"Could not connect to remote ChromaDB server at {self.host}:{self.port}")
         self.collection_name = "meetup_events"
         self.collection = self._initialize_collection()
 
@@ -2543,156 +2577,21 @@ Current user message: {user_message}"""
             return f"Sorry, I encountered an error: {str(e)}"
 
 # Create bot instance
-bot = MeetupBot()
-
-# Instructions for use
-print("🚀 Welcome to Miffy - Your Personal Meetup Recommendation Assistant!")
-print("=" * 60)
-print("📋 Instructions:")
-print("1. Miffy will automatically sync events from the API")
-print("2. Start chatting with Miffy about events you're interested in")
-print("3. Miffy will recommend events based on your preferences")
-print("4. Type 'quit' to exit the conversation")
-print("")
-print("🔥 NEW: JSON API for Recommendations!")
-print("• bot.get_recommendations_json(request_data)")
-print("• Returns structured JSON with match scores and reasons")
-print("• Perfect for mobile apps and web integrations!")
-print("=" * 60)
-
-# Step 1: Check if data already exists
-print("\n📁 Step 1: Checking for existing data...")
-print(f"🔧 Debug: ChromaDB server: {bot.chroma_manager.host}:{bot.chroma_manager.port}")
-
-# Add error handling for collection info
-try:
-    collection_info = bot.chroma_manager.get_collection_stats()
-    print(f"🔧 Debug: Collection info: {collection_info}")
-    existing_events = collection_info.get('total_events', 0)
-    print(f"🔧 Debug: Existing events count: {existing_events}")
-except Exception as e:
-    print(f"🔧 Debug: Error getting collection info: {e}")
-    existing_events = 0
-
-if existing_events > 0:
-    print(f"✅ Found {existing_events} events in ChromaDB! Using existing data.")
-    print("🔄 Running incremental sync to get latest updates...")
-    bot.sync_events_once(full_sync=False)  # Incremental sync to get updates
-else:
-    print("❌ No existing events found. Running full initial sync...")
-    bot.sync_events_once(full_sync=True)  # Full sync for first time
-    time.sleep(2)
-
-    # Check again after sync
-    try:
-        collection_info = bot.chroma_manager.get_collection_stats()
-        existing_events = collection_info.get('total_events', 0)
-        if existing_events > 0:
-            print(f"✅ Now have {existing_events} events in ChromaDB!")
-        else:
-            print("❌ Still no events found after sync. Please check API connection.")
-    except Exception as e:
-        print(f"❌ Error checking collection after sync: {e}")
-
-# Check user preferences collection as well
-print("\n📁 Step 1b: Checking user preferences data...")
-try:
-    user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
-    print(f"🔧 Debug: User preferences info: {user_prefs_info}")
-    existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
-    print(f"🔧 Debug: Existing user preferences count: {existing_user_prefs}")
+# Only run interactive mode when script is run directly
+if __name__ == "__main__":
+    bot = MeetupBot()
     
-    if existing_user_prefs == 0:
-        print("ℹ️ No user preferences found.")
-        # Diagnostics
-        bot.chroma_manager.validate_user_prefs_setup()
-    else:
-        print(f"✅ Found {existing_user_prefs} existing user preferences in ChromaDB!")
-    
-    # Always offer CSV import option
-    print("\n📥 CSV Import Options:")
-    print("You can import user preferences from CSV file:")
-    print("- Upload a new CSV file")
-    print("- Replace existing preferences")
-    print("- Add to existing preferences")
-    
-    try:
-        tmp_mgr = bot.user_pref_sync_manager
-        imported = tmp_mgr.prompt_and_import_csv_interactive()
-        if imported > 0:
-            print(f"✅ Imported {imported} user preferences from CSV", flush=True)
-            user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
-            existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
-            print(f"🔧 Debug: Total user preferences count after CSV import: {existing_user_prefs}")
-        else:
-            print("ℹ️ No CSV import performed.")
-    except Exception as e:
-        print(f"❌ CSV import attempt failed: {e}", flush=True)
-except Exception as e:
-    print(f"❌ Error checking user preferences: {e}")
-
-if existing_events > 0:
-    print("\n🎉 Great! Event data ready.")
-    # Step 2: Start conversation
-    print("\n💬 Step 2: Start chatting with Miffy")
-    print("Try asking things like:")
-    print("- 'Looking for something fun to do today'")
-    print("- 'I want to play football in Mumbai'")
-    print("- 'Show me tech events under ₹500'")
-    print("- 'I enjoy hiking and outdoor activities on weekends'")
-    print("\n🎯 **For best results**: Share your preferences first!")
-    print("   The Miffy will ask about your interests, location, and budget if not provided.")
-
-    # Updated synchronization options
-    print("\n🔄 Event Synchronization Options:")
-    print("1. bot.start_conversation() - Start with existing data (recommended)")
-    print("2. bot.start_with_sync(2) - Start with 2-minute incremental sync")
-    print("3. bot.sync_events_once(full_sync=False) - Run incremental sync")
-    print("4. bot.sync_events_once(full_sync=True) - Run full sync (clears existing)")
-    print("\nNow preserves existing event data and uses incremental updates!")
-    print("Periodic sync focuses on '/updated' API for efficient updates every 2 minutes.")
-    
-    print("\n📋 User Preferences CSV Import Methods:")
-    print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")
-    print("• bot.user_pref_sync_manager.prompt_and_import_csv_interactive()") 
-    print("• bot.user_pref_sync_manager.import_user_preferences_from_dataframe(df)")
-    
-    print("\n🔥 JSON API Usage Examples:")
-    print("=" * 50)
-    print("# Example 1: Get recommendations for user with saved preferences")
-    print('request = {"user_id": ""451 "limit": 3}')
-    print('result = bot.get_recommendations_json(request)')
-    print()
-    print("# Example 2: Override preferences for specific request")
-    print('request = {')
-    print('    "user_id": "451",')
-    print('    "preferences": {')
-    print('        "activities": ["badminton", "yoga"],')
-    print('        "location": "Mumbai",')
-    print('        "budget_max": 500')
-    print('    },')
-    print('    "limit": 5')
-    print('}')
-    print('result = bot.get_recommendations_json(request)')
-    print()
-    print("# Example 3: Search without user_id")
-    print('request = {')
-    print('    "preferences": {')
-    print('        "activities": ["cricket"],')
-    print('        "areas": ["Bandra", "Andheri"]')
-    print('    },')
-    print('    "query": "cricket weekend"')
-    print('}')
-    print('result = bot.get_recommendations_json(request)')
-    print()
-    print("# Response includes:")
-    print("• match_score (0.0-1.0) for each event")
-    print("• why_recommended explanation")
-    print("• Complete event details with IST times")
-    print("• location details (venue, area, city)")
-    print("• Direct registration URLs")
-    print("=" * 50)
-
-    bot.start_conversation()
-else:
-    print("❌ Please check the API connection and try again.")
+    # Instructions for use
+    print("🚀 Welcome to Miffy - Your Personal Meetup Recommendation Assistant!")
+    print("=" * 60)
+    print("📋 Instructions:")
+    print("1. Miffy will automatically sync events from the API")
+    print("2. Start chatting with Miffy about events you're interested in")
+    print("3. Miffy will recommend events based on your preferences")
+    print("4. Type 'quit' to exit the conversation")
+    print("")
+    print("🔥 NEW: JSON API for Recommendations!")
+    print("• bot.get_recommendations_json(request_data)")
+    print("• Returns structured JSON with match scores and reasons")
+    print("• Perfect for mobile apps and web integrations!")
+    print("=" * 60)

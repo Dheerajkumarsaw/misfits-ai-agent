@@ -21,7 +21,7 @@ spec:
         - containerPort: 8000
         env:
         - name: CHROMA_HOST
-          value: "chromadb.misfits.net.in"
+          value: "43.205.192.16"
         - name: CHROMA_PORT
           value: "8000"
         resources:

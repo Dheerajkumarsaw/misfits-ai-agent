@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  meetup-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CHROMA_HOST=43.205.192.16
+      - CHROMA_PORT=8000
+    volumes:
+      # Mount local ChromaDB data directory if using local storage
+      - ./chroma_data:/app/chroma_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/liveness"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - meetup-network
+
+networks:
+  meetup-network:
+    driver: bridge
+
+volumes:
+  chroma_data:
+    driver: local
