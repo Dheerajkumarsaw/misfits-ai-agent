@@ -48,10 +48,16 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 # Initialize the NVIDIA API client
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key="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"
-)
+try:
+    client = OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key="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"
+    )
+    print("✅ OpenAI client initialized successfully")
+except Exception as e:
+    print(f"⚠️ OpenAI client initialization failed: {e}")
+    # Create a dummy client that will fail gracefully
+    client = None
 
 # EventDetailsForAgent class to match the gRPC message structure
 class EventDetailsForAgent:
@@ -2036,6 +2042,9 @@ Current user message: {user_message}"""
                 {"role": "user", "content": user_message}
             ]
             # Make API call with streaming
+            if client is None:
+                return "Sorry, the AI service is currently unavailable due to initialization issues."
+            
             completion = client.chat.completions.create(
                 model="qwen/qwq-32b",
                 messages=messages,

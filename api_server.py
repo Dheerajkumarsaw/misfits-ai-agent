@@ -228,13 +228,10 @@ async def readiness():
     """Kubernetes readiness probe"""
     try:
         bot = get_bot()
-        stats = bot.chroma_manager.get_collection_stats()
-        if stats.get('total_events', 0) > 0:
-            return {"status": "ready", "events": stats.get('total_events')}
-        else:
-            raise HTTPException(status_code=503, detail="No events loaded")
+        # Just check if bot can be created - don't require events
+        return {"status": "ready", "bot_initialized": True}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=f"Bot initialization failed: {str(e)}")
 
 if __name__ == "__main__":
     # Run with uvicorn for production
