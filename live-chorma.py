@@ -29,7 +29,12 @@ import json
 from openai import OpenAI
 from datetime import datetime, timezone, timedelta
 import re
-from google.colab import files
+# Conditional import for Colab compatibility
+try:
+    from google.colab import files
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
 import io
 import chromadb
 from chromadb.config import Settings
