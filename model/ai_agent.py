@@ -1,8 +1,12 @@
 # Interactive Meetup Recommendation Bot with ChromaDB Integration
 # Install required packages at the start
+from enum import verify
+import http
 from pickle import FALSE
 import subprocess
 import sys
+
+from requests.auth import HTTPProxyAuth
 # import chromadb.utils.embedding_functions
 
 def install_package(package):
@@ -39,12 +43,15 @@ import requests
 import threading
 import time
 import asyncio
+import httpx
 from concurrent.futures import ThreadPoolExecutor
 
 # Initialize the NVIDIA API client
+http_client = httpx.Client(timeout=30.0)
 client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
-    api_key="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"
+    api_key="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",
+    http_client=http_client
 )
 
 # EventDetailsForAgent class to match the gRPC message structure
