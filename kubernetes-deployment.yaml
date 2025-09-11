@@ -30,6 +30,8 @@ spec:
           value: "1"
         - name: OPENAI_BASE_URL
           value: "https://integrate.api.nvidia.com/v1"
+        - name: OPENAI_API_KEY
+          value: "nvapi-YOUR-API-KEY-HERE"  # Replace with your actual NVIDIA API key
         resources:
           requests:
             memory: "1Gi"
