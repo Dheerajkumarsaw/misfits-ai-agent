@@ -1,12 +1,9 @@
 # Interactive Meetup Recommendation Bot with ChromaDB Integration
 # Install required packages at the start
-from enum import verify
-import http
 from pickle import FALSE
 import subprocess
 import sys
 
-from requests.auth import HTTPProxyAuth
 # import chromadb.utils.embedding_functions
 
 def install_package(package):
