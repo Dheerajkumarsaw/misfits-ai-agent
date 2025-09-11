@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ai-agent-prod
-  labels:
-    name: ai-agent-prod
-    environment: production

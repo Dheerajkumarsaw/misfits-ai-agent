@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-mpnet-base-v2')"
 
 # Copy application files from model directory
-COPY model/ai-agent.py .
+COPY model/ai_agent.py .
 COPY model/api_server.py .
 
 
