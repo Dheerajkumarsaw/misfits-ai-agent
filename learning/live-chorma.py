@@ -17,12 +17,12 @@ def install_package(package):
 
 # Install all required packages - commented out for production
 # Package installation should be done via requirements.txt
-# print("🔧 Installing required packages...")
-# packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "requests", "sentence-transformers"]
-# for package in packages:
-#     install_package(package)
-# 
-# print("✅ All packages installed!")
+print("🔧 Installing required packages...")
+packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "requests", "sentence-transformers"]
+for package in packages:
+    install_package(package)
+
+print("✅ All packages installed!")
 
 # Now import all required libraries
 import pandas as pd
@@ -180,8 +180,8 @@ class ChromaDBManager:
         # Initialize embedding function
         self.embedding_function = chromadb.utils.embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-mpnet-base-v2"  # Larger but more accurate model
-        )
         
+        )
         # Initialize ChromaDB client and collection
         try:
             # Try to connect with default settings
@@ -2517,17 +2517,33 @@ Current user message: {user_message}"""
         if user_areas and event_area in user_areas:
             score += 0.15
         
-        # Budget match (15% weight)
+        # Budget match (15% weight) with robust numeric parsing
         user_budget = preferences.get('budget_max')
-        event_price = event.get('ticket_price', 0)
-        if user_budget is not None:
-            if event_price <= user_budget:
+        def _to_float(val):
+            try:
+                if val is None or val == "":
+                    return 0.0
+                return float(val)
+            except Exception:
+                return 0.0
+        budget_max = _to_float(user_budget)
+        event_price_num = _to_float(event.get('ticket_price', 0))
+        if budget_max > 0:
+            if event_price_num <= budget_max:
                 score += 0.15
-            elif event_price <= user_budget * 1.2:
+            elif event_price_num <= budget_max * 1.2:
                 score += 0.08
         
-        # Availability (5% weight)
-        if event.get('available_spots', 0) > 0:
+        # Availability (5% weight) with robust int parsing
+        def _to_int(val):
+            try:
+                if val is None or val == "":
+                    return 0
+                return int(float(val))
+            except Exception:
+                return 0
+        available_spots_num = _to_int(event.get('available_spots', 0))
+        if available_spots_num > 0:
             score += 0.05
         
         return min(score, 1.0)

@@ -27,7 +27,7 @@ print("✅ All packages installed!")
 import pandas as pd
 import json
 from openai import OpenAI
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import re
 from google.colab import files
 import io
@@ -91,19 +91,23 @@ class EventDetailsForAgent:
             return str(description)
 
     def _parse_datetime(self, time_obj):
-        """Parse datetime from API response format"""
+        """Parse datetime from API response format and convert to IST"""
         try:
             date_part = time_obj.get('date', {})
             time_part = time_obj.get('time', {})
 
-            dt = datetime(
+            # Assume incoming times are in UTC and convert to IST (UTC+5:30)
+            dt_utc = datetime(
                 year=date_part.get('year', 2025),
                 month=date_part.get('month', 1),
                 day=date_part.get('day', 1),
                 hour=time_part.get('hour', 0),
-                minute=time_part.get('minute', 0)
+                minute=time_part.get('minute', 0),
+                tzinfo=timezone.utc
             )
-            return dt.strftime("%Y-%m-%d %H:%M")
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            dt_ist = dt_utc.astimezone(ist_tz)
+            return dt_ist.strftime("%Y-%m-%d %H:%M IST")
         except:
             return str(time_obj)
 
@@ -128,26 +132,25 @@ class EventDetailsForAgent:
         }
 
 class ChromaDBManager:
-    def __init__(self, persist_directory: str = "./chroma_db"):
+    def __init__(self, host: str = "43.205.192.16", port: int = 8000):
         """
-        Initialize ChromaDB manager with SentenceTransformer embeddings
+        Initialize ChromaDB manager with SentenceTransformer embeddings (remote server)
         
         Args:
-            persist_directory: Directory to persist ChromaDB data
+            host: ChromaDB server hostname
+            port: ChromaDB server port
         """
-        self.persist_directory = persist_directory
-        print(f"💾 Initializing ChromaDB at: {persist_directory}")
-        
-        # Create directory if it doesn't exist
-        os.makedirs(persist_directory, exist_ok=True)
+        self.host = host
+        self.port = port
+        print(f"🌐 Connecting to ChromaDB at: {host}:{port}")
         
         # Initialize embedding function
         self.embedding_function = chromadb.utils.embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-mpnet-base-v2"  # Larger but more accurate model
         )
         
-        # Initialize ChromaDB client and collection
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        # Initialize ChromaDB HTTP client and collection
+        self.client = chromadb.HttpClient(host=host, port=port)
         self.collection_name = "meetup_events"
         self.collection = self._initialize_collection()
 
@@ -680,7 +683,8 @@ class ChromaDBManager:
             return {
                 "collection_name": self.collection_name,
                 "total_events": count,
-                "persist_directory": self.persist_directory,
+                "host": self.host,
+                "port": self.port,
                 "last_updated": datetime.now().isoformat()
             }
         except Exception as e:
@@ -736,7 +740,8 @@ class ChromaDBManager:
             return {
                 "collection_name": self.user_prefs_collection_name,
                 "total_user_preferences": count,
-                "persist_directory": self.persist_directory,
+                "host": self.host,
+                "port": self.port,
                 "last_updated": datetime.now().isoformat()
             }
         except Exception as e:
@@ -780,7 +785,7 @@ class ChromaDBManager:
         """Print diagnostics helpful for fixing user preferences initialization issues."""
         try:
             print("🔎 Validating user preferences setup...", flush=True)
-            print(f"📁 Persist dir: {self.persist_directory}", flush=True)
+            print(f"🌐 ChromaDB server: {self.host}:{self.port}", flush=True)
             print(f"🗂️ Events collection: {self.collection_name}", flush=True)
             print(f"🗂️ User prefs collection: {self.user_prefs_collection_name}", flush=True)
             print(f"🧠 Embedding function: {self.get_embedding_function_info()}", flush=True)
@@ -1337,6 +1342,17 @@ class MeetupBot:
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
 
+    def _get_registration_url(self, event: dict) -> str:
+        """Return the best available registration URL or empty string if none."""
+        return (
+            event.get('registration_url') or
+            event.get('event_url') or
+            event.get('signup_url') or
+            event.get('booking_url') or
+            event.get('link') or
+            event.get('url') or ""
+        )
+
     def search_events_vector(self, query: str, n_results: int = 5):
         """Search events using ChromaDB vector search"""
         try:
@@ -1366,6 +1382,9 @@ class MeetupBot:
 
     def format_events_response(self, events: list) -> str:
         """Format events list into a readable response"""
+        # Filter out any events that do not have a registration URL
+        events = [e for e in (events or []) if self._get_registration_url(e)]
+
         if not events:
             return "Sorry, I couldn't find any events matching your request. Try different keywords or check back later!"
 
@@ -1388,8 +1407,9 @@ class MeetupBot:
                     desc = desc[:200] + "..."
                 response += f"📝 **Description**: {desc}\n"
 
-            if event.get('registration_url'):
-                response += f"🔗 **Register Here**: {event['registration_url']}\n"
+            reg_url = self._get_registration_url(event)
+            # reg_url is guaranteed non-empty due to filtering
+            response += f"🔗 **Register Here**: {reg_url}\n"
             if event.get('location_url'):
                 response += f"🗺️ **Location Map**: {event['location_url']}\n"
 
@@ -1439,6 +1459,8 @@ class MeetupBot:
         relevant_events = []
         if not prefs_missing or _message_has_preference_clues(user_message):
             relevant_events = self.search_events_vector(user_message, n_results=10)
+            # Filter out any events lacking a registration URL
+            relevant_events = [e for e in (relevant_events or []) if self._get_registration_url(e)]
 
         # Convert relevant events to string format for context
         events_context = "Relevant Events Data (from vector search):\n"
@@ -1451,7 +1473,7 @@ class MeetupBot:
                 events_context += f"  Where: {event.get('location_name', 'N/A')} ({event.get('area_name', 'N/A')}, {event.get('city_name', 'N/A')})\n"
                 events_context += f"  Price: ₹{event.get('ticket_price', 'N/A')} | Spots: {event.get('available_spots', 'N/A')}\n"
                 events_context += f"  Payment: {event.get('payment_terms', 'N/A')}\n"
-                events_context += f"  URL: {event.get('registration_url', 'N/A')}\n\n"
+                events_context += f"  URL: {self._get_registration_url(event)}\n\n"
         else:
             if prefs_missing and not _message_has_preference_clues(user_message):
                 events_context += "Awaiting user preferences. Ask the user about their hobbies, interests, preferred activities, city/area, budget, and timing.\n"
@@ -1480,13 +1502,14 @@ Instructions:
    - Price and available spots
    - 1–2 line description focused on fit
    - Registration URL
+   - Only show events that have a valid registration URL; exclude any event without one.
 4. If nothing is a direct match, provide reasonable alternatives (nearby dates/areas/categories) and tips to refine the search.
 5. If the user provides a user_id, FIRST retrieve their preferences from the user_preferences collection and tailor recommendations accordingly. If there is no user preference data avilable first ask the user to share their preferences. ask what are thier hobbies and intrestes and based on that then recommend them the meetups after the user share their preferences.
 6. And user has himself provided the suggestion and preferences then repeat instruction no 1,2 and 3 based on his input.
 7. Be concise, friendly, and helpful. Use a few tasteful emojis.
 8. Never invent facts. If a field is missing, say “N/A”.
 9. Prefer recent/upcoming events over past ones.
-10. Always retrive the data of events from the vector database only with consise information about the all the fields. And the registration url should be perfectally fetched from the database and exact. 
+10. Always retrive the data of events from the vector database only with consise information about the all the fields. The registration URL must be fetched exactly from the database, and events without a registration URL must NOT be shown. 
 
 Current user message: {user_message}"""
         return system_prompt
@@ -1609,7 +1632,7 @@ print("=" * 60)
 
 # Step 1: Check if data already exists
 print("\n📁 Step 1: Checking for existing data...")
-print(f"🔧 Debug: ChromaDB persist directory: {bot.chroma_manager.persist_directory}")
+print(f"🔧 Debug: ChromaDB server: {bot.chroma_manager.host}:{bot.chroma_manager.port}")
 
 # Add error handling for collection info
 try:

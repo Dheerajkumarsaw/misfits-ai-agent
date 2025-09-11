@@ -10,6 +10,8 @@ requests==2.31.0
 python-multipart==0.0.6
 typing-extensions>=4.5.0
 asyncio>=3.4.3
+# WebSocket support (FastAPI uses starlette websockets)
+websockets>=11.0
 # Standard library packages (no need to install):
 # - pickle, subprocess, sys, json, datetime, re, io, typing, uuid, os, threading, time, concurrent.futures
 # cors==1.0.1  # Not needed - CORS is handled by fastapi

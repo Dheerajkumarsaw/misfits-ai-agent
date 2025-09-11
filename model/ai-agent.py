@@ -29,7 +29,6 @@ import json
 from openai import OpenAI
 from datetime import datetime, timezone, timedelta
 import re
-from google.colab import files
 import io
 import chromadb
 from chromadb.config import Settings
@@ -1416,39 +1415,39 @@ class UserPreferenceSyncManager:
             print(f"❌ Error reading CSV at {csv_path}: {e}", flush=True)
             return 0
 
-    def prompt_and_import_csv_interactive(self) -> int:
-        """Prompt user to upload or provide path to CSV and import user preferences."""
-        try:
-            # Prefer Colab's upload UI if available
-            try:
-                from google.colab import files as colab_files  # type: ignore
-                print("📤 Please upload a CSV file with user preferences...", flush=True)
-                uploaded = colab_files.upload()
-                if uploaded:
-                    name = next(iter(uploaded.keys()))
-                    data = uploaded[name]
-                    df = pd.read_csv(io.BytesIO(data))
-                    count = self.import_user_preferences_from_dataframe(df)
-                    print(f"✅ Imported {count} user preferences from uploaded CSV", flush=True)
-                    return count
-            except Exception:
-                # Not in Colab or upload failed; fall back to path prompt
-                pass
+   #  def prompt_and_import_csv_interactive(self) -> int:
+   #      """Prompt user to upload or provide path to CSV and import user preferences."""
+   #      try:
+   #          # Prefer Colab's upload UI if available
+   #          # try:
 
-            try:
-                path = input("Enter CSV path to import user preferences (or press Enter to skip): ").strip()
-            except Exception:
-                path = ""
-            if not path:
-                print("ℹ️ CSV import skipped", flush=True)
-                return 0
-            count = self.import_user_preferences_from_csv_path(path)
-            if count > 0:
-                print(f"✅ Imported {count} user preferences from {path}", flush=True)
-            return count
-        except Exception as e:
-            print(f"❌ Error during interactive CSV import: {e}", flush=True)
-            return 0
+   #          #     print("📤 Please upload a CSV file with user preferences...", flush=True)
+   #          #     uploaded = colab_files.upload()
+   #          #     if uploaded:
+   #          #         name = next(iter(uploaded.keys()))
+   #          #         data = uploaded[name]
+   #          #         df = pd.read_csv(io.BytesIO(data))
+   #          #         count = self.import_user_preferences_from_dataframe(df)
+   #          #         print(f"✅ Imported {count} user preferences from uploaded CSV", flush=True)
+   #          #         return count
+   #          # except Exception:
+   #          #     # Not in Colab or upload failed; fall back to path prompt
+   #          #     pass
+
+   #          try:
+   #              path = input("Enter CSV path to import user preferences (or press Enter to skip): ").strip()
+   #          except Exception:
+   #              path = ""
+   #          if not path:
+   #              print("ℹ️ CSV import skipped", flush=True)
+   #              return 0
+   #          count = self.import_user_preferences_from_csv_path(path)
+   #          if count > 0:
+   #              print(f"✅ Imported {count} user preferences from {path}", flush=True)
+   #          return count
+   #      except Exception as e:
+   #          print(f"❌ Error during interactive CSV import: {e}", flush=True)
+   #          return 0
 
 class MeetupBot:
     def __init__(self):
@@ -1457,6 +1456,63 @@ class MeetupBot:
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
+
+    def _safe_float(self, value):
+        """Safely convert value to float"""
+        try:
+            if value is None:
+                return 0.0
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+    
+    def _safe_int(self, value):
+        """Safely convert value to int"""
+        try:
+            if value is None:
+                return 0
+            return int(value)
+        except (ValueError, TypeError):
+            return 0
+
+    def extract_events_from_response(self, response_text: str, fallback_events: list = None) -> list:
+        """Extract structured event data from AI response text or use fallback"""
+        try:
+            # First try to find JSON array in the response
+            json_match = re.search(r'\[\s*\{[^\]]+\]', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    events_json = json.loads(json_match.group())
+                    if isinstance(events_json, list):
+                        return events_json
+                except json.JSONDecodeError:
+                    pass
+            
+            # If JSON extraction failed, use fallback events if provided
+            if fallback_events:
+                return fallback_events
+            
+            # Try to extract event information from natural language
+            events = []
+            event_pattern = r'(?:Event|\d+\.)\s*([^\n]+?)(?:\n|$)'
+            matches = re.findall(event_pattern, response_text)
+            
+            for match in matches[:5]:  # Limit to 5 events
+                # Try to parse event details from text
+                event = {
+                    "name": match.strip(),
+                    "activity": "",
+                    "location": {},
+                    "price": 0,
+                    "registration_url": ""
+                }
+                events.append(event)
+            
+            return events if events else fallback_events or []
+            
+        except Exception as e:
+            print(f"Error extracting events: {e}")
+            return fallback_events or []
 
     def search_events_vector(self, query: str, n_results: int = 5):
         """Search events using ChromaDB vector search"""
@@ -1569,8 +1625,12 @@ class MeetupBot:
                 return False
         try:
             import re
-            # Heuristic: look for patterns like user_id: 123 or uid 123 or just a long number token
-            id_match = re.search(r"(?:user[_ ]?id|uid|id)\D*(\d{3,})", user_message, flags=re.IGNORECASE)
+            # Look for patterns like [User ID: 123] or user_id: 123 or uid 123
+            # First check for the format we're using: [User ID: 123]
+            id_match = re.search(r"\[User ID:\s*(\d+)\]", user_message)
+            if not id_match:
+                # Fallback to other patterns
+                id_match = re.search(r"(?:user[_ ]?id|uid|id)[:\s]*(\d{3,})", user_message, flags=re.IGNORECASE)
             if not id_match:
                 # fallback: a standalone 5+ digit number
                 id_match = re.search(r"\b(\d{5,})\b", user_message)
@@ -1749,6 +1809,25 @@ class MeetupBot:
 {user_pref_context}
 
 Instructions:
+
+RESPONSE FORMAT FOR EVENT RECOMMENDATIONS:
+- When providing event recommendations, ALWAYS include a JSON array of events
+- Format: After your friendly message, add: "EVENTS_JSON: [{{event1}}, {{event2}}, ...]"
+- Each event object must include: event_id, name, club_name, activity, start_time, location (with venue, area, city), price, registration_url
+- Example: EVENTS_JSON: [{{"event_id": "123", "name": "Tech Meetup", "club_name": "Tech Club", "activity": "Technology", "start_time": "2024-01-20 18:00", "location": {{"venue": "Hub", "area": "Downtown", "city": "Mumbai"}}, "price": 500, "registration_url": "https://example.com"}}]
+
+CRITICAL USER PREFERENCE MATCHING:
+- When user has saved preferences (especially activity preferences), ONLY recommend events matching those preferences
+- If user attended cricket events before, prioritize cricket events
+- If user likes specific activities, DO NOT recommend unrelated activities
+- Better to show fewer relevant events than many irrelevant ones
+
+IMPORTANT - ONLY SHOW FUTURE EVENTS:
+- NEVER recommend events that have already passed
+- Always check event start_time against current date/time
+- Filter out any events with start_time in the past
+- If an event doesn't have a start_time, be cautious about recommending it
+- Today's events are OK if they haven't started yet
 
 PERSONALITY & TONE:
 - Be warm, enthusiastic, and conversational (not robotic)
@@ -2176,18 +2255,16 @@ Current user message: {user_message}"""
                 score += 0.25
             factors += 1
         
-        # Budget match (20% weight)
-        user_budget = preferences.get('budget_max')
-        event_price = event.get('ticket_price', 0)
-        if user_budget is not None:
-            if event_price <= user_budget:
-                score += 0.2
-            elif event_price <= user_budget * 1.2:  # 20% tolerance
-                score += 0.1
-            factors += 1
+        # Budget match removed per user request
+        # Budget filtering has been disabled
         
         # Availability bonus (10% weight)
         available_spots = event.get('available_spots', 0)
+        # Ensure numeric type
+        try:
+            available_spots = int(available_spots) if isinstance(available_spots, str) else available_spots
+        except (ValueError, TypeError):
+            available_spots = 0
         if available_spots > 0:
             score += 0.1
         
@@ -2209,11 +2286,8 @@ Current user message: {user_message}"""
         if user_areas and event_area.lower() in [area.lower() for area in user_areas]:
             reasons.append(f"in your preferred area ({event_area})")
         
-        # Budget match
-        user_budget = preferences.get('budget_max')
-        event_price = event.get('ticket_price', 0)
-        if user_budget and event_price <= user_budget:
-            reasons.append(f"within your budget (₹{event_price})")
+        # Budget match removed per user request
+        # Budget filtering has been disabled
         
         # High match score
         if score > 0.8:
@@ -2233,8 +2307,8 @@ Current user message: {user_message}"""
                 "query": "user's natural language query",
                 "user_id": "optional user id",
                 "user_current_city": "user's current location (any city)",
-                "limit": 5,
-                "preferences": {...}
+                "preferences": {...},
+                "limit": "max number of results (default 5)"
             }
         
         Returns:
@@ -2244,15 +2318,19 @@ Current user message: {user_message}"""
             user_id = request_data.get('user_id')
             user_current_city = request_data.get('user_current_city', '').lower().strip()
             query = request_data.get('query', '')
-            limit = request_data.get('limit', 5)
             override_preferences = request_data.get('preferences', {})
+            limit = request_data.get('limit', 5)  # Default to 5 recommendations
             
             # Get user preferences
             user_preferences = {}
             if user_id:
+                print(f"🔍 Looking up preferences for user_id: {user_id}")
                 saved_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
                 if saved_prefs:
                     user_preferences = saved_prefs
+                    print(f"✅ Found user preferences: {user_preferences}")
+                else:
+                    print(f"⚠️ No saved preferences found for user_id: {user_id}")
             
             # Override with provided preferences
             if override_preferences:
@@ -2265,20 +2343,81 @@ Current user message: {user_message}"""
                 if not any(city_keyword in query.lower() for city_keyword in ['mumbai', 'delhi', 'bangalore', 'pune', 'chennai', 'kolkata']):
                     user_preferences['location'] = user_current_city
             
-            # Build search query
+            # Build search query - PRIORITIZE USER PREFERENCES
             search_query = query
-            if not search_query and user_preferences:
-                activities = user_preferences.get('activities', [])
-                if activities:
-                    search_query = ' '.join(activities)
-                if user_current_city:
-                    search_query += f" {user_current_city}"
+            
+            # If user has saved preferences, use them to enhance the search
+            if user_preferences:
+                print(f"🔍 Processing user preferences: {user_preferences}")
+                # Extract activities from user preferences (from metadata if available)
+                activities = []
+                if 'metadata' in user_preferences:
+                    activities_summary = user_preferences.get('metadata', {}).get('activities_summary', '')
+                    print(f"📝 Activities summary from metadata: {activities_summary}")
+                    # Extract specific activities from the summary
+                    if activities_summary:
+                        if 'cricket' in activities_summary.lower():
+                            activities.append('cricket')
+                        if 'football' in activities_summary.lower():
+                            activities.append('football')
+                        if 'badminton' in activities_summary.lower():
+                            activities.append('badminton')
+                        if 'music' in activities_summary.lower():
+                            activities.append('music')
+                        if 'journaling' in activities_summary.lower():
+                            activities.append('journaling')
+                        if 'pickleball' in activities_summary.lower():
+                            activities.append('pickleball')
+                        # Add more activity extraction as needed
+                else:
+                    activities = user_preferences.get('activities', [])
+                
+                print(f"🎯 Extracted activities: {activities}")
+                
+                # If user has specific activity preferences, prioritize them
+                if activities and ('find events' in query.lower() or 'events for me' in query.lower()):
+                    # User is asking for general events, use their preferences
+                    search_query = ' '.join(activities) + f" {user_current_city}"
+                    print(f"🔎 Using preference-based search query: {search_query}")
+                elif not search_query:
+                    # No specific query, use preferences
+                    search_query = ' '.join(activities) if activities else ''
+                    if user_current_city:
+                        search_query += f" {user_current_city}"
+                    print(f"🔎 Using default preference search: {search_query}")
             
             # Get events
             relevant_events = []
             if search_query:
                 # Get more results initially for better filtering
                 relevant_events = self.chroma_manager.search_events(search_query, n_results=limit * 3)
+            
+            # Filter out past events
+            from datetime import datetime
+            current_time = datetime.now()
+            future_events = []
+            for event in relevant_events:
+                try:
+                    # Parse event start time
+                    start_time_str = event.get('start_time', '')
+                    if start_time_str:
+                        # Try to parse the datetime string (format: "2025-09-10 15:00")
+                        event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
+                        # Only include future events
+                        if event_time > current_time:
+                            future_events.append(event)
+                        else:
+                            print(f"⏭️ Filtering out past event: {event.get('name', '')} - {start_time_str}")
+                    else:
+                        # If no start time, include it (safer to show than hide)
+                        future_events.append(event)
+                except Exception as e:
+                    # If parsing fails, include the event (safer to show than hide)
+                    print(f"⚠️ Could not parse date for event {event.get('name', '')}: {e}")
+                    future_events.append(event)
+            
+            relevant_events = future_events
+            print(f"📅 Filtered to {len(relevant_events)} future events from {len(relevant_events) + (len(relevant_events) - len(future_events))} total")
             
             # Filter by current city if provided - WORKS WITH ANY CITY
             if user_current_city:
@@ -2367,8 +2506,8 @@ Current user message: {user_message}"""
                             "city": event.get('city_name', ''),
                             "full_address": f"{event.get('location_name', '')}, {event.get('area_name', '')}, {event.get('city_name', '')}"
                         },
-                        "price": event.get('ticket_price', 0),
-                        "available_spots": event.get('available_spots', 0),
+                        "price": self._safe_float(event.get('ticket_price', 0)),
+                        "available_spots": self._safe_int(event.get('available_spots', 0)),
                         "registration_url": registration_url,
                         "_score": score  # Temporary for sorting
                     }
@@ -2389,11 +2528,8 @@ Current user message: {user_message}"""
                 "success": True,
                 "recommendations": top_recommendations,
                 "total_found": len(scored_events),
-                "user_preferences_used": user_preferences,
                 "message": f"Found {len(top_recommendations)} events in {user_current_city}" if user_current_city else f"Found {len(top_recommendations)} recommended events",
-                "bot_response": bot_response,
-                "query": query,
-                "user_current_city": user_current_city
+                "bot_response": bot_response
             }
             
         except Exception as e:
@@ -2436,14 +2572,32 @@ Current user message: {user_message}"""
             if score == 0 and (current_city in event_city or event_city in current_city):
                 score += 0.35
         
-        # Activity match (30% weight)
-        user_activities = preferences.get('activities', [])
+        # Activity match (50% weight - INCREASED for better preference matching)
+        user_activities = []
+        # Extract activities from metadata if available
+        if 'metadata' in preferences:
+            activities_summary = preferences.get('metadata', {}).get('activities_summary', '')
+            if activities_summary:
+                # Extract specific activities
+                if 'cricket' in activities_summary.lower():
+                    user_activities.append('cricket')
+                if 'football' in activities_summary.lower():
+                    user_activities.append('football')
+                if 'badminton' in activities_summary.lower():
+                    user_activities.append('badminton')
+                # Add more as needed
+        else:
+            user_activities = preferences.get('activities', [])
+        
         event_activity = event.get('activity', '').lower()
         if user_activities:
             for activity in user_activities:
                 if activity.lower() in event_activity or event_activity in activity.lower():
-                    score += 0.30
+                    score += 0.50  # Increased weight for activity match
                     break
+            # Penalty for non-matching activities when user has preferences
+            else:
+                score -= 0.20  # Penalize events that don't match user preferences
         
         # Area match (15% weight)
         user_areas = [area.lower() for area in preferences.get('areas', [])]
@@ -2451,17 +2605,17 @@ Current user message: {user_message}"""
         if user_areas and event_area in user_areas:
             score += 0.15
         
-        # Budget match (15% weight)
-        user_budget = preferences.get('budget_max')
-        event_price = event.get('ticket_price', 0)
-        if user_budget is not None:
-            if event_price <= user_budget:
-                score += 0.15
-            elif event_price <= user_budget * 1.2:
-                score += 0.08
+        # Budget match removed per user request
+        # Budget filtering has been disabled
         
         # Availability (5% weight)
-        if event.get('available_spots', 0) > 0:
+        available_spots = event.get('available_spots', 0)
+        # Ensure numeric type
+        try:
+            available_spots = int(available_spots) if isinstance(available_spots, str) else available_spots
+        except (ValueError, TypeError):
+            available_spots = 0
+        if available_spots > 0:
             score += 0.05
         
         return min(score, 1.0)
@@ -2510,7 +2664,6 @@ Current user message: {user_message}"""
             response += f"   📍 {event['location']['venue']}, {event['location']['area']}\n"
             response += f"   ⏰ {event['start_time']} to {event['end_time']}\n"
             response += f"   💰 ₹{event['price']}\n"
-            response += f"   ✨ {event['why_recommended']}\n"
             response += f"   🔗 Register: {event['registration_url']}\n\n"
         
         if len(events) > 3:
@@ -2521,164 +2674,261 @@ Current user message: {user_message}"""
     def get_bot_response_json(self, user_message: str, user_id: str = None) -> str:
         """Get bot response in JSON-friendly format"""
         try:
-            # Similar to get_bot_response but returns just the text
-            response = self.get_bot_response(user_message, user_id)
+            # If user_id is provided, include it in the message context
+            if user_id:
+                enhanced_message = f"[User ID: {user_id}] {user_message}"
+            else:
+                enhanced_message = user_message
+            
+            # Call get_bot_response with just the message
+            response = self.get_bot_response(enhanced_message)
             # Clean up any console formatting
             return response.replace("Miffy: ", "").strip()
         except Exception as e:
             return f"Sorry, I encountered an error: {str(e)}"
+    
+    def get_recommendations_with_json_extraction(self, request_data: dict) -> dict:
+        """
+        Enhanced version that ensures JSON extraction from AI responses
+        """
+        try:
+            # First get structured recommendations from database
+            result = self.get_recommendations_json(request_data)
+            
+            # Validate and ensure proper JSON structure for each event
+            if result.get("recommendations"):  # Check if we have recommendations regardless of success flag
+                validated_events = []
+                for event in result.get("recommendations", []):
+                    # Ensure all required fields are present
+                    validated_event = {
+                        "event_id": str(event.get('event_id', '')),
+                        "name": str(event.get('name', event.get('event_name', 'Unnamed Event'))),
+                        "club_name": str(event.get('club_name', 'Unknown Club')),
+                        "activity": str(event.get('activity', 'General')),
+                        "start_time": str(event.get('start_time', '')),
+                        "end_time": str(event.get('end_time', '')),
+                        "location": event.get('location', {}),
+                        "price": self._safe_float(event.get('price', event.get('ticket_price', 0))),
+                        "available_spots": self._safe_int(event.get('available_spots', 0)),
+                        "registration_url": str(event.get('registration_url', 'Contact organizer'))
+                    }
+                    
+                    # Ensure location is properly structured
+                    if not isinstance(validated_event['location'], dict):
+                        # If location is not a dict, create empty dict
+                        validated_event['location'] = {}
+                    
+                    # Only add fields if they don't exist and we have data
+                    # Don't add TBD - let the frontend handle missing data
+                    
+                    validated_events.append(validated_event)
+                
+                result["recommendations"] = validated_events
+                result["success"] = True  # Set success to True if we have recommendations
+                result["total_found"] = len(validated_events)
+                return result
+            
+            # If no recommendations from DB, try getting from AI response
+            user_message = request_data.get('query', '')
+            user_id = request_data.get('user_id')
+            if user_message and not result.get("recommendations"):
+                # Include user ID in the message for context
+                if user_id:
+                    enhanced_message = f"[User ID: {user_id}] {user_message}"
+                else:
+                    enhanced_message = user_message
+                # Get AI response with user context
+                ai_response = self.get_bot_response(enhanced_message)
+                
+                # Extract events from AI response
+                extracted_events = self.extract_events_from_response(
+                    ai_response, 
+                    result.get("recommendations", [])
+                )
+                
+                # Validate extracted events
+                validated_events = []
+                for event in extracted_events:
+                    validated_event = {
+                        "event_id": str(event.get('event_id', '')),
+                        "name": str(event.get('name', 'Unnamed Event')),
+                        "club_name": str(event.get('club_name', 'Unknown')),
+                        "activity": str(event.get('activity', 'General')),
+                        "start_time": str(event.get('start_time', '')),
+                        "end_time": str(event.get('end_time', '')),
+                        "location": event.get('location', {}),
+                        "price": self._safe_float(event.get('price', 0)),
+                        "available_spots": self._safe_int(event.get('available_spots', 0)),
+                        "registration_url": str(event.get('registration_url', 'Contact organizer'))
+                    }
+                    validated_events.append(validated_event)
+                
+                # Update result with validated events
+                result["recommendations"] = validated_events
+                result["total_found"] = len(validated_events)
+                
+            return result
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "recommendations": [],
+                "message": f"Error: {str(e)}"
+            }
 
-# Create bot instance
-bot = MeetupBot()
+if __name__ == "__main__":
+    # Create bot instance
+    bot = MeetupBot()
 
-# Instructions for use
-print("🚀 Welcome to Miffy - Your Personal Meetup Recommendation Assistant!")
-print("=" * 60)
-print("📋 Instructions:")
-print("1. Miffy will automatically sync events from the API")
-print("2. Start chatting with Miffy about events you're interested in")
-print("3. Miffy will recommend events based on your preferences")
-print("4. Type 'quit' to exit the conversation")
-print("")
-print("🔥 NEW: JSON API for Recommendations!")
-print("• bot.get_recommendations_json(request_data)")
-print("• Returns structured JSON with match scores and reasons")
-print("• Perfect for mobile apps and web integrations!")
-print("=" * 60)
+    # Instructions for use
+    print("🚀 Welcome to Miffy - Your Personal Meetup Recommendation Assistant!")
+    print("=" * 60)
+    print("📋 Instructions:")
+    print("1. Miffy will automatically sync events from the API")
+    print("2. Start chatting with Miffy about events you're interested in")
+    print("3. Miffy will recommend events based on your preferences")
+    print("4. Type 'quit' to exit the conversation")
+    print("")
+    print("🔥 NEW: JSON API for Recommendations!")
+    print("• bot.get_recommendations_json(request_data)")
+    print("• Returns structured JSON with match scores and reasons")
+    print("• Perfect for mobile apps and web integrations!")
+    print("=" * 60)
 
-# Step 1: Check if data already exists
-print("\n📁 Step 1: Checking for existing data...")
-print(f"🔧 Debug: ChromaDB server: {bot.chroma_manager.host}:{bot.chroma_manager.port}")
+    # Step 1: Check if data already exists
+    print("\n📁 Step 1: Checking for existing data...")
+    print(f"🔧 Debug: ChromaDB server: {bot.chroma_manager.host}:{bot.chroma_manager.port}")
 
-# Add error handling for collection info
-try:
-    collection_info = bot.chroma_manager.get_collection_stats()
-    print(f"🔧 Debug: Collection info: {collection_info}")
-    existing_events = collection_info.get('total_events', 0)
-    print(f"🔧 Debug: Existing events count: {existing_events}")
-except Exception as e:
-    print(f"🔧 Debug: Error getting collection info: {e}")
-    existing_events = 0
-
-if existing_events > 0:
-    print(f"✅ Found {existing_events} events in ChromaDB! Using existing data.")
-    print("🔄 Running incremental sync to get latest updates...")
-    bot.sync_events_once(full_sync=False)  # Incremental sync to get updates
-else:
-    print("❌ No existing events found. Running full initial sync...")
-    bot.sync_events_once(full_sync=True)  # Full sync for first time
-    time.sleep(2)
-
-    # Check again after sync
+    # Add error handling for collection info
     try:
         collection_info = bot.chroma_manager.get_collection_stats()
+        print(f"🔧 Debug: Collection info: {collection_info}")
         existing_events = collection_info.get('total_events', 0)
-        if existing_events > 0:
-            print(f"✅ Now have {existing_events} events in ChromaDB!")
-        else:
-            print("❌ Still no events found after sync. Please check API connection.")
+        print(f"🔧 Debug: Existing events count: {existing_events}")
     except Exception as e:
-        print(f"❌ Error checking collection after sync: {e}")
+        print(f"🔧 Debug: Error getting collection info: {e}")
+        existing_events = 0
 
-# Check user preferences collection as well
-print("\n📁 Step 1b: Checking user preferences data...")
-try:
-    user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
-    print(f"🔧 Debug: User preferences info: {user_prefs_info}")
-    existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
-    print(f"🔧 Debug: Existing user preferences count: {existing_user_prefs}")
-    
-    if existing_user_prefs == 0:
-        print("ℹ️ No user preferences found.")
-        # Diagnostics
-        bot.chroma_manager.validate_user_prefs_setup()
+    if existing_events > 0:
+        print(f"✅ Found {existing_events} events in ChromaDB! Using existing data.")
+        print("🔄 Running incremental sync to get latest updates...")
+        bot.sync_events_once(full_sync=False)  # Incremental sync to get updates
     else:
-        print(f"✅ Found {existing_user_prefs} existing user preferences in ChromaDB!")
-    
-    # Always offer CSV import option
-    print("\n📥 CSV Import Options:")
-    print("You can import user preferences from CSV file:")
-    print("- Upload a new CSV file")
-    print("- Replace existing preferences")
-    print("- Add to existing preferences")
-    
+        print("❌ No existing events found. Running full initial sync...")
+        bot.sync_events_once(full_sync=True)  # Full sync for first time
+        time.sleep(2)
+
+        # Check again after sync
+        try:
+            collection_info = bot.chroma_manager.get_collection_stats()
+            existing_events = collection_info.get('total_events', 0)
+            if existing_events > 0:
+                print(f"✅ Now have {existing_events} events in ChromaDB!")
+            else:
+                print("❌ Still no events found after sync. Please check API connection.")
+        except Exception as e:
+            print(f"❌ Error checking collection after sync: {e}")
+
+    # Check user preferences collection as well
+    print("\n📁 Step 1b: Checking user preferences data...")
     try:
-        tmp_mgr = bot.user_pref_sync_manager
-        imported = tmp_mgr.prompt_and_import_csv_interactive()
-        if imported > 0:
-            print(f"✅ Imported {imported} user preferences from CSV", flush=True)
-            user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
-            existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
-            print(f"🔧 Debug: Total user preferences count after CSV import: {existing_user_prefs}")
+        user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
+        print(f"🔧 Debug: User preferences info: {user_prefs_info}")
+        existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
+        print(f"🔧 Debug: Existing user preferences count: {existing_user_prefs}")
+        
+        if existing_user_prefs == 0:
+            print("ℹ️ No user preferences found.")
+            # Diagnostics
+            bot.chroma_manager.validate_user_prefs_setup()
         else:
-            print("ℹ️ No CSV import performed.")
+            print(f"✅ Found {existing_user_prefs} existing user preferences in ChromaDB!")
+        
+        # Always offer CSV import option
+        print("\n📥 CSV Import Options:")
+        print("You can import user preferences from CSV file:")
+        print("- Upload a new CSV file")
+        print("- Replace existing preferences")
+        print("- Add to existing preferences")
+        
+       #  try:
+       #      tmp_mgr = bot.user_pref_sync_manager
+       #    #   imported = tmp_mgr.prompt_and_import_csv_interactive()
+       #      if imported > 0:
+       #          print(f"✅ Imported {imported} user preferences from CSV", flush=True)
+       #          user_prefs_info = bot.chroma_manager.get_user_prefs_stats()
+       #          existing_user_prefs = user_prefs_info.get('total_user_preferences', 0)
+       #          print(f"🔧 Debug: Total user preferences count after CSV import: {existing_user_prefs}")
+       #      else:
+       #          print("ℹ️ No CSV import performed.")
+       #  except Exception as e:
+       #      print(f"❌ CSV import attempt failed: {e}", flush=True)
     except Exception as e:
-        print(f"❌ CSV import attempt failed: {e}", flush=True)
-except Exception as e:
-    print(f"❌ Error checking user preferences: {e}")
+        print(f"❌ Error checking user preferences: {e}")
 
-if existing_events > 0:
-    print("\n🎉 Great! Event data ready.")
-    # Step 2: Start conversation
-    print("\n💬 Step 2: Start chatting with Miffy")
-    print("Try asking things like:")
-    print("- 'Looking for something fun to do today'")
-    print("- 'I want to play football in Mumbai'")
-    print("- 'Show me tech events under ₹500'")
-    print("- 'I enjoy hiking and outdoor activities on weekends'")
-    print("\n🎯 **For best results**: Share your preferences first!")
-    print("   The Miffy will ask about your interests, location, and budget if not provided.")
+    if existing_events > 0:
+        print("\n🎉 Great! Event data ready.")
+        # Step 2: Start conversation
+        print("\n💬 Step 2: Start chatting with Miffy")
+        print("Try asking things like:")
+        print("- 'Looking for something fun to do today'")
+        print("- 'I want to play football in Mumbai'")
+        print("- 'Show me tech events under ₹500'")
+        print("- 'I enjoy hiking and outdoor activities on weekends'")
+        print("\n🎯 **For best results**: Share your preferences first!")
+        print("   The Miffy will ask about your interests, location, and budget if not provided.")
 
-    # Updated synchronization options
-    print("\n🔄 Event Synchronization Options:")
-    print("1. bot.start_conversation() - Start with existing data (recommended)")
-    print("2. bot.start_with_sync(2) - Start with 2-minute incremental sync")
-    print("3. bot.sync_events_once(full_sync=False) - Run incremental sync")
-    print("4. bot.sync_events_once(full_sync=True) - Run full sync (clears existing)")
-    print("\nNow preserves existing event data and uses incremental updates!")
-    print("Periodic sync focuses on '/updated' API for efficient updates every 2 minutes.")
-    
-    print("\n📋 User Preferences CSV Import Methods:")
-    print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")
-    print("• bot.user_pref_sync_manager.prompt_and_import_csv_interactive()") 
-    print("• bot.user_pref_sync_manager.import_user_preferences_from_dataframe(df)")
-    
-    print("\n🔥 JSON API Usage Examples:")
-    print("=" * 50)
-    print("# Example 1: Get recommendations for user with saved preferences")
-    print('request = {"user_id": ""451 "limit": 3}')
-    print('result = bot.get_recommendations_json(request)')
-    print()
-    print("# Example 2: Override preferences for specific request")
-    print('request = {')
-    print('    "user_id": "451",')
-    print('    "preferences": {')
-    print('        "activities": ["badminton", "yoga"],')
-    print('        "location": "Mumbai",')
-    print('        "budget_max": 500')
-    print('    },')
-    print('    "limit": 5')
-    print('}')
-    print('result = bot.get_recommendations_json(request)')
-    print()
-    print("# Example 3: Search without user_id")
-    print('request = {')
-    print('    "preferences": {')
-    print('        "activities": ["cricket"],')
-    print('        "areas": ["Bandra", "Andheri"]')
-    print('    },')
-    print('    "query": "cricket weekend"')
-    print('}')
-    print('result = bot.get_recommendations_json(request)')
-    print()
-    print("# Response includes:")
-    print("• match_score (0.0-1.0) for each event")
-    print("• why_recommended explanation")
-    print("• Complete event details with IST times")
-    print("• location details (venue, area, city)")
-    print("• Direct registration URLs")
-    print("=" * 50)
+        # Updated synchronization options
+        print("\n🔄 Event Synchronization Options:")
+        print("1. bot.start_conversation() - Start with existing data (recommended)")
+        print("2. bot.start_with_sync(2) - Start with 2-minute incremental sync")
+        print("3. bot.sync_events_once(full_sync=False) - Run incremental sync")
+        print("4. bot.sync_events_once(full_sync=True) - Run full sync (clears existing)")
+        print("\nNow preserves existing event data and uses incremental updates!")
+        print("Periodic sync focuses on '/updated' API for efficient updates every 2 minutes.")
+        
+        print("\n📋 User Preferences CSV Import Methods:")
+        print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")
+        print("• bot.user_pref_sync_manager.prompt_and_import_csv_interactive()") 
+        print("• bot.user_pref_sync_manager.import_user_preferences_from_dataframe(df)")
+        
+        print("\n🔥 JSON API Usage Examples:")
+        print("=" * 50)
+        print("# Example 1: Get recommendations for user with saved preferences")
+        print('request = {"user_id": ""451 "limit": 3}')
+        print('result = bot.get_recommendations_json(request)')
+        print()
+        print("# Example 2: Override preferences for specific request")
+        print('request = {')
+        print('    "user_id": "451",')
+        print('    "preferences": {')
+        print('        "activities": ["badminton", "yoga"],')
+        print('        "location": "Mumbai",')
+        print('        "budget_max": 500')
+        print('    },')
+        print('    "limit": 5')
+        print('}')
+        print('result = bot.get_recommendations_json(request)')
+        print()
+        print("# Example 3: Search without user_id")
+        print('request = {')
+        print('    "preferences": {')
+        print('        "activities": ["cricket"],')
+        print('        "areas": ["Bandra", "Andheri"]')
+        print('    },')
+        print('    "query": "cricket weekend"')
+        print('}')
+        print('result = bot.get_recommendations_json(request)')
+        print()
+        print("# Response includes:")
+        print("• match_score (0.0-1.0) for each event")
+        print("• why_recommended explanation")
+        print("• Complete event details with IST times")
+        print("• location details (venue, area, city)")
+        print("• Direct registration URLs")
+        print("=" * 50)
 
-    bot.start_conversation()
-else:
-    print("❌ Please check the API connection and try again.")
+        bot.start_conversation()
+    else:
+        print("❌ Please check the API connection and try again.")
