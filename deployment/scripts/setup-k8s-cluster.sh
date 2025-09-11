@@ -23,16 +23,16 @@ echo ""
 
 # Update system
 echo -e "${YELLOW}Updating system packages...${NC}"
-sudo apt-get update
-sudo apt-get upgrade -y
+sudo yum update
+sudo yum upgrade -y
 
 # Install Docker
 echo -e "${BLUE}Installing Docker...${NC}"
-sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+sudo yum install -y apt-transport-https ca-certificates curl software-properties-common
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+sudo yum update
+sudo yum install -y docker-ce docker-ce-cli containerd.io
 
 # Configure Docker
 sudo mkdir -p /etc/docker
@@ -65,8 +65,8 @@ sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 echo -e "${BLUE}Installing Kubernetes components...${NC}"
 curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
 echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt-get update
-sudo apt-get install -y kubelet=1.28.0-00 kubeadm=1.28.0-00 kubectl=1.28.0-00
+sudo yum update
+sudo yum install -y kubelet=1.28.0-00 kubeadm=1.28.0-00 kubectl=1.28.0-00
 sudo apt-mark hold kubelet kubeadm kubectl
 
 # Enable kernel modules
