@@ -2759,12 +2759,15 @@ Current user message: {user_message}"""
             
             # Handle empty state - if no relevant events found
             if not relevant_events:
-                guidance_message = self._generate_no_events_guidance_message(filter_city, query, user_id)
+                # Use conversational message based on context
+                conversational_message = self._generate_conversational_no_events_message(
+                    query, filter_city, explicit_activities if explicit_activity_request else [], user_id
+                )
                 return {
                     "success": False,  # Changed to False to indicate no events found
                     "recommendations": [],
                     "total_found": 0,
-                    "message": guidance_message  # Use guidance directly, no bot_response
+                    "message": conversational_message
                 }
             
             # For explicit requests, skip scoring - user knows exactly what they want
@@ -2811,11 +2814,17 @@ Current user message: {user_message}"""
                     formatted_events.append(event_data)
                 
                 requested_activities_str = ', '.join(explicit_activities)
+                # More conversational success message
+                if len(formatted_events) == 1:
+                    success_message = f"Great! Found a perfect {requested_activities_str} event for you in {filter_city}!"
+                else:
+                    success_message = f"Awesome! Found {len(formatted_events)} {requested_activities_str} events in {filter_city}!"
+                
                 return {
                     "success": True,
                     "recommendations": formatted_events,
                     "total_found": len(relevant_events),
-                    "message": f"Found {len(formatted_events)} {requested_activities_str} events in {filter_city}"
+                    "message": success_message
                 }
             
             # Score and format events (for non-explicit requests)
@@ -2870,11 +2879,23 @@ Current user message: {user_message}"""
                 event_data.pop('_score', None)
             top_recommendations = scored_events[:limit]
             
+            # More conversational success message for general recommendations
+            if len(top_recommendations) == 0:
+                # This case should be handled by the empty state above, but just in case
+                conversational_message = self._generate_conversational_no_events_message(
+                    query, filter_city, explicit_activities if explicit_activity_request else [], user_id
+                )
+                message = conversational_message
+            elif len(top_recommendations) == 1:
+                message = f"Perfect! Found a great event that matches your interests in {filter_city}!" if filter_city else "Perfect! Found a great event that matches your interests!"
+            else:
+                message = f"Excellent! Found {len(top_recommendations)} events that match your interests in {filter_city}!" if filter_city else f"Excellent! Found {len(top_recommendations)} events that match your interests!"
+            
             return {
                 "success": True,
                 "recommendations": top_recommendations,
                 "total_found": len(scored_events),
-                "message": f"Found {len(top_recommendations)} events in {filter_city}" if filter_city else f"Found {len(top_recommendations)} recommended events"
+                "message": message
             }
             
         except Exception as e:
@@ -3070,6 +3091,52 @@ Current user message: {user_message}"""
                 f"I couldn't find {activity} in {city.title()} today. How about checking out events in nearby cities, or trying a different activity?",
                 f"{activity.title()} isn't available in {city.title()} at the moment. Would you like me to show you events from your saved preferences instead?"
             ]
+        
+        return random.choice(messages)
+
+    def _generate_conversational_no_events_message(self, query: str, city: str, activities: list, user_id: str = None):
+        """Generate helpful conversational message when no events found based on context"""
+        import random
+        
+        # Determine context
+        has_activity = bool(activities)
+        has_city = bool(city)
+        query_lower = query.lower()
+        
+        if has_activity and has_city:
+            # Both activity and city specified
+            activity_str = ', '.join(activities)
+            messages = [
+                f"We couldn't find any {activity_str} events in {city.title()} right now. Would you be interested in trying a different activity or checking events in nearby cities?",
+                f"No {activity_str} events available in {city.title()} at the moment. How about exploring other activities or different locations?",
+                f"Looks like {activity_str} isn't happening in {city.title()} currently. Can I suggest similar activities or events in other cities?"
+            ]
+        elif has_city and not has_activity:
+            # Only city specified
+            messages = [
+                f"We couldn't find any events in {city.title()} matching your criteria. What activities are you interested in? This will help me find better options.",
+                f"No events found in {city.title()} right now. Would you like to check events in nearby cities or tell me what activities you enjoy?",
+                f"Nothing available in {city.title()} at the moment. Should I look in different cities or would you like to specify what type of events you're looking for?"
+            ]
+        elif has_activity and not has_city:
+            # Only activity specified
+            activity_str = ', '.join(activities)
+            messages = [
+                f"We couldn't find any {activity_str} events in your area. Would you like to search in a different city or try other activities?",
+                f"No {activity_str} events available right now. Can I suggest different activities or should I check other locations?",
+                f"Looks like {activity_str} isn't available at the moment. Would you be interested in similar activities or events in other areas?"
+            ]
+        else:
+            # Generic request
+            messages = [
+                "We couldn't find any events matching your request. Could you tell me what activities interest you and your preferred location?",
+                "No events found for your criteria. What type of activities do you enjoy? Also, which city or area works best for you?",
+                "I couldn't find suitable events right now. Help me understand your interests - what activities and locations would you prefer?"
+            ]
+        
+        # Add time-based suggestions if weekend/weekday mentioned
+        if any(time_word in query_lower for time_word in ['weekend', 'saturday', 'sunday', 'weekday', 'today', 'tomorrow']):
+            messages = [m.rstrip('?') + " Or would you like to see events for different dates?" for m in messages]
         
         return random.choice(messages)
     
