@@ -1969,10 +1969,14 @@ Current user message: {user_message}"""
         if city_match:
             preferences['city'] = city_match.group(1)
         
-        # Extract activities/interests
+        # Extract activities/interests - includes all Misfits activities
         activity_keywords = ['football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga', 
                            'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
-                           'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking']
+                           'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+                           'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films', 
+                           'poetry', 'writing', 'harry_potter', 'pop_culture', 'community_space', 
+                           'content_creation', 'bowling', 'mindfulness', 'others', 'pickleball', 
+                           'journaling', 'quiz', 'drama', 'theater', 'improv', 'sports', 'fitness']
         found_activities = []
         for activity in activity_keywords:
             if activity.lower() in user_message.lower():
@@ -2410,11 +2414,14 @@ Current user message: {user_message}"""
             explicit_city_request = False
             activities = []  # Saved activities from preferences
             
-            # Comprehensive activity and city lists
+            # Comprehensive activity and city lists - includes all Misfits activities
             all_activities = ['football', 'soccer', 'cricket', 'badminton', 'tennis', 'basketball', 'volleyball',
                             'swimming', 'gym', 'yoga', 'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 
                             'cycling', 'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
-                            'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv', 'sports', 'fitness']
+                            'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv', 'sports', 'fitness',
+                            'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films', 'poetry', 
+                            'writing', 'harry_potter', 'pop_culture', 'community_space', 'content_creation', 
+                            'bowling', 'mindfulness', 'others']
             
             city_keywords = ['mumbai', 'delhi', 'bangalore', 'bengaluru', 'pune', 'chennai', 'kolkata',
                            'noida', 'gurgaon', 'gurugram', 'hyderabad', 'ahmedabad', 'faridabad', 'ghaziabad',
@@ -2440,7 +2447,34 @@ Current user message: {user_message}"""
                 'quiz': ['quiz', 'trivia', 'knowledge'],
                 'drama': ['drama', 'theater', 'theatre', 'acting'],
                 'theater': ['theater', 'theatre', 'drama', 'acting'],
-                'sports': ['sports', 'football', 'cricket', 'badminton', 'tennis', 'basketball']
+                'sports': ['sports', 'football', 'cricket', 'badminton', 'tennis', 'basketball'],
+                'boardgaming': ['boardgaming', 'board_games', 'board games', 'games', 'tabletop'],
+                'social_deductions': ['social_deductions', 'social deductions', 'deduction', 'mafia', 'werewolf'],
+                'book_club': ['book_club', 'book club', 'reading', 'books', 'literature'],
+                'box_cricket': ['box_cricket', 'box cricket', 'cricket', 'sports'],
+                'films': ['films', 'movies', 'cinema', 'movie', 'film'],
+                'poetry': ['poetry', 'poems', 'poem', 'writing', 'literature'],
+                'writing': ['writing', 'creative writing', 'storytelling', 'literature'],
+                'harry_potter': ['harry_potter', 'harry potter', 'hp', 'hogwarts', 'potterhead'],
+                'pop_culture': ['pop_culture', 'pop culture', 'popculture', 'entertainment'],
+                'community_space': ['community_space', 'community space', 'community', 'social'],
+                'content_creation': ['content_creation', 'content creation', 'creator', 'creative'],
+                'bowling': ['bowling', 'sports', 'entertainment'],
+                'mindfulness': ['mindfulness', 'meditation', 'wellness', 'mental health'],
+                'others': ['others', 'other', 'miscellaneous', 'misc'],
+                'pickleball': ['pickleball', 'pickle ball', 'sports'],
+                'journaling': ['journaling', 'journal', 'writing', 'reflection'],
+                'trekking': ['trekking', 'hiking', 'outdoor', 'adventure'],
+                'cycling': ['cycling', 'biking', 'bike', 'sports'],
+                'photography': ['photography', 'photo', 'creative', 'art'],
+                'hiking': ['hiking', 'trekking', 'outdoor', 'adventure'],
+                'fitness': ['fitness', 'workout', 'gym', 'exercise'],
+                'improv': ['improv', 'improvisation', 'comedy', 'theater'],
+                'startup': ['startup', 'business', 'entrepreneur', 'tech'],
+                'business': ['business', 'networking', 'startup', 'entrepreneur'],
+                'networking': ['networking', 'business', 'professional'],
+                'cooking': ['cooking', 'food', 'culinary', 'chef'],
+                'food': ['food', 'cooking', 'culinary', 'dining']
             }
             
             # STEP 1: Extract explicitly mentioned activities and cities from current query
@@ -2639,11 +2673,14 @@ Current user message: {user_message}"""
                     for activity in activity_matches:
                         user_preferred_activities.append(activity.lower())
                     
-                    # Fallback: Extract preferred activities from summary
+                    # Fallback: Extract preferred activities from summary - includes all Misfits activities
                     activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga', 
                                        'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
                                        'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking', 
-                                       'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv']
+                                       'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv',
+                                       'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films', 
+                                       'poetry', 'writing', 'harry_potter', 'pop_culture', 'community_space', 
+                                       'content_creation', 'bowling', 'mindfulness', 'others', 'sports', 'fitness']
                     for keyword in activity_keywords:
                         if keyword.lower() in activities_summary.lower() and keyword.lower() not in user_preferred_activities:
                             user_preferred_activities.append(keyword.lower())
@@ -2892,11 +2929,14 @@ Current user message: {user_message}"""
                 for activity in activity_matches:
                     user_activities.append(activity.lower())
                 
-                # Fallback: Extract specific activities
+                # Fallback: Extract specific activities - includes all Misfits activities
                 activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
                                    'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
                                    'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
-                                   'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv']
+                                   'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv',
+                                   'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films', 
+                                   'poetry', 'writing', 'harry_potter', 'pop_culture', 'community_space', 
+                                   'content_creation', 'bowling', 'mindfulness', 'others', 'sports', 'fitness']
                 for keyword in activity_keywords:
                     if keyword.lower() in activities_summary.lower() and keyword.lower() not in user_activities:
                         user_activities.append(keyword.lower())
@@ -2972,7 +3012,10 @@ Current user message: {user_message}"""
         for activity_word in ['football', 'soccer', 'cricket', 'badminton', 'tennis', 'basketball', 
                              'volleyball', 'swimming', 'gym', 'yoga', 'quiz', 'drama', 'sports', 
                              'music', 'tech', 'dance', 'comedy', 'art', 'hiking', 'cycling', 
-                             'running', 'fitness', 'pickleball', 'theater', 'improv']:
+                             'running', 'fitness', 'pickleball', 'theater', 'improv', 'boardgaming',
+                             'social_deductions', 'book_club', 'box_cricket', 'films', 'poetry', 
+                             'writing', 'harry_potter', 'pop_culture', 'community_space', 
+                             'content_creation', 'bowling', 'mindfulness', 'others']:
             if activity_word in query.lower():
                 activity = activity_word
                 break
