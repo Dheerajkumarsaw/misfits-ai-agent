@@ -1030,8 +1030,12 @@ class EventSyncManager:
         """Run a single synchronization of events from API
         
         Args:
-            full_sync: If True, performs full sync with upcoming+updated events (default: False)
-                      If False, only syncs updated events for incremental updates
+            full_sync: If True, calls both /upcoming + /updated APIs (for initial load)
+                      If False, only calls /updated API (for incremental updates)
+        
+        API Call Behavior:
+            • full_sync=True  → /upcoming API + /updated API (complete refresh)
+            • full_sync=False → /updated API only (incremental sync)
         """
         try:
             if full_sync:
@@ -1100,7 +1104,8 @@ class EventSyncManager:
     def _sync_loop(self, interval_minutes: int):
         """Background sync loop - runs incremental updates"""
         while self.is_running:
-            # Use incremental sync (only updated events) for periodic updates
+            # Use incremental sync (only /updated API) for periodic updates
+            # This is efficient - only calls /updated API to get new/changed events
             self.run_single_sync(full_sync=False)
             time.sleep(interval_minutes * 60)
 
@@ -1456,7 +1461,7 @@ class UserPreferenceSyncManager:
 class MeetupBot:
     def __init__(self):
         self.events_data = None
-        self.conversation_history = []
+        self.user_conversations = {}  # Store conversation history per user_id
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
@@ -1478,6 +1483,26 @@ class MeetupBot:
             return int(value)
         except (ValueError, TypeError):
             return 0
+
+    def _get_user_conversation_history(self, user_id: str = None):
+        """Get conversation history for specific user"""
+        if not user_id:
+            return []
+        if user_id not in self.user_conversations:
+            self.user_conversations[user_id] = []
+        return self.user_conversations[user_id]
+    
+    def _add_to_user_conversation(self, user_id: str, role: str, content: str):
+        """Add message to user-specific conversation history"""
+        if not user_id:
+            return
+        if user_id not in self.user_conversations:
+            self.user_conversations[user_id] = []
+        self.user_conversations[user_id].append({"role": role, "content": content})
+        
+        # Keep only last 10 messages per user to avoid memory bloat
+        if len(self.user_conversations[user_id]) > 10:
+            self.user_conversations[user_id] = self.user_conversations[user_id][-10:]
 
     def extract_events_from_response(self, response_text: str, fallback_events: list = None) -> list:
         """Extract structured event data from AI response text or use fallback"""
@@ -1587,7 +1612,7 @@ class MeetupBot:
 
         return response
 
-    def prepare_context(self, user_message):
+    def prepare_context(self, user_message, user_id: str = None):
         """Prepare context with dataset information for the AI model"""
         # Optional: detect a user_id in the message to personalize recommendations
         user_pref_context = ""
@@ -1659,7 +1684,8 @@ class MeetupBot:
             pass
 
         # Check if this is the first message without preferences
-        is_initial_request = len(self.conversation_history) == 0
+        user_history = self._get_user_conversation_history(user_id)
+        is_initial_request = len(user_history) == 0
         
         # Extract specific preferences from current message
         def _extract_message_preferences(text: str) -> dict:
@@ -1803,7 +1829,7 @@ class MeetupBot:
 
         # Add conversation history
         history_context = "\nConversation History:\n"
-        for msg in self.conversation_history[-6:]:
+        for msg in user_history[-6:]:  # Use user-specific history
             history_context += f"{msg['role']}: {msg['content']}\n"
 
         system_prompt = f"""You are a warm, enthusiastic, and friendly meetup recommendation assistant named Miffy. You love helping people discover exciting events and make new connections. You have access to a vector database of events and provide personalized recommendations with genuine enthusiasm.
@@ -1821,10 +1847,18 @@ RESPONSE FORMAT FOR EVENT RECOMMENDATIONS:
 - Example: EVENTS_JSON: [{{"event_id": "123", "name": "Tech Meetup", "club_name": "Tech Club", "activity": "Technology", "start_time": "2024-01-20 18:00", "location": {{"venue": "Hub", "area": "Downtown", "city": "Mumbai"}}, "price": 500, "registration_url": "https://example.com"}}]
 
 CRITICAL USER PREFERENCE MATCHING:
-- When user has saved preferences (especially activity preferences), ONLY recommend events matching those preferences
-- If user attended cricket events before, prioritize cricket events
-- If user likes specific activities, DO NOT recommend unrelated activities
-- Better to show fewer relevant events than many irrelevant ones
+⭐ **DEFAULT BEHAVIOR**: When user has saved activity preferences, ALWAYS prioritize and return events matching those activities FIRST
+- If user has saved "cricket" preference → show ONLY cricket events unless they explicitly ask for something else
+- If user has saved "music, dance" preferences → show ONLY music and dance events unless they specify different activities
+- If user says "find events" or "events for me" → use their SAVED activity preferences automatically
+- If user says "show me badminton events" but their saved preference is cricket → show badminton (they explicitly requested different)
+
+**STRICT PREFERENCE ADHERENCE**:
+- User's saved activity preferences = their default interests
+- DO NOT mix unrelated activities unless user explicitly asks for variety
+- DO NOT recommend football events to a cricket-preferring user without explicit request
+- Better to show 2 relevant events than 10 irrelevant ones
+- Only deviate from saved preferences when user explicitly requests different activities
 
 IMPORTANT - ONLY SHOW FUTURE EVENTS:
 - NEVER recommend events that have already passed
@@ -2072,13 +2106,30 @@ Current user message: {user_message}"""
         
         return full_greeting
     
-    def get_bot_response(self, user_message):
+    def get_bot_response(self, user_message, user_id: str = None):
         """Get response from the AI model with streaming"""
         try:
-            # Check if this is the first message and handle user ID requests appropriately
-            if len(self.conversation_history) == 0:
-                # Try to extract user_id from message if provided
-                user_id = None
+            # Try to extract user_id from message if not provided
+            extracted_user_id = user_id
+            if not extracted_user_id:
+                try:
+                    import re
+                    id_match = re.search(r"(?:user[_ ]?id|uid|id)[:\s]*(\d+)", user_message, re.IGNORECASE)
+                    if id_match:
+                        extracted_user_id = id_match.group(1)
+                    # Also try to extract from [User ID: ...] format
+                    bracket_match = re.search(r"\[User ID:\s*(\w+)\]", user_message, re.IGNORECASE)
+                    if bracket_match:
+                        extracted_user_id = bracket_match.group(1)
+                except:
+                    pass
+            
+            # Get user-specific conversation history
+            user_history = self._get_user_conversation_history(extracted_user_id)
+            
+            # Check if this is the first message for this user
+            if len(user_history) == 0 and not user_id:  # Only show greeting for CLI mode
+                # Try to extract user info from message for greeting
                 user_name = None
                 is_user_id_request = False
                 try:
@@ -2086,11 +2137,6 @@ Current user message: {user_message}"""
                     # Check if this is a user ID request
                     if re.search(r"(?:find events?|events?)\s+for\s+user[_ ]?id\s+(\d+)", user_message, re.IGNORECASE):
                         is_user_id_request = True
-                        # Don't show greeting for user ID requests - the AI will handle it contextually
-                    
-                    id_match = re.search(r"(?:user[_ ]?id|uid|id)[:\s]*(\d+)", user_message, re.IGNORECASE)
-                    if id_match:
-                        user_id = id_match.group(1)
                     
                     # Try to extract name
                     name_match = re.search(r"(?:i'm|i am|name is|this is)\s+([A-Z][a-z]+)", user_message, re.IGNORECASE)
@@ -2101,13 +2147,14 @@ Current user message: {user_message}"""
                 
                 # Only show greeting if it's not a user ID request
                 if not is_user_id_request:
-                    greeting = self.generate_personalized_greeting(user_id, user_name)
+                    greeting = self.generate_personalized_greeting(extracted_user_id, user_name)
                     print(f"\nBot: {greeting}\n")
             
-            # Add user message to history
-            self.conversation_history.append({"role": "user", "content": user_message})
+            # Add user message to user-specific history
+            self._add_to_user_conversation(extracted_user_id, "user", user_message)
+            
             # Prepare the context
-            system_context = self.prepare_context(user_message)
+            system_context = self.prepare_context(user_message, extracted_user_id)
             # Prepare messages for the API
             messages = [
                 {"role": "system", "content": system_context},
@@ -2147,6 +2194,7 @@ Current user message: {user_message}"""
         
         if existing_events == 0:
             print("❌ No event data available. Running full initial sync...")
+            print("📞 This will call /upcoming API to load all current events")
             self.event_sync_manager.run_single_sync(full_sync=True)
             time.sleep(2)  # Wait a moment for sync to complete
 
@@ -2335,6 +2383,18 @@ Current user message: {user_message}"""
                     print(f"✅ Found user preferences: {user_preferences}")
                 else:
                     print(f"⚠️ No saved preferences found for user_id: {user_id}")
+                    # Check if this is an event-finding request
+                    event_keywords = ["event", "find", "recommend", "suggest", "show", "search", "looking for", "want"]
+                    if any(keyword in query.lower() for keyword in event_keywords):
+                        print(f"🚨 Event request detected without preferences - requesting preferences first")
+                        return {
+                            "success": False,
+                            "recommendations": [],
+                            "total_found": 0,
+                            "message": "I'd love to help you find events! To give you personalized recommendations, please tell me what activities and interests you enjoy.",
+                            "needs_preferences": True,
+                            "bot_response": "Since this is our first time working together, I'd love to learn about your interests! What activities get you excited? (sports, arts, tech, music, etc.)"
+                        }
             
             # Override with provided preferences
             if override_preferences:
@@ -2343,52 +2403,98 @@ Current user message: {user_message}"""
             # IMPORTANT: Set current city as primary location filter
             if user_current_city:
                 user_preferences['current_city'] = user_current_city
-                # Unless user explicitly asks for another city, filter by current city
-                if not any(city_keyword in query.lower() for city_keyword in ['mumbai', 'delhi', 'bangalore', 'pune', 'chennai', 'kolkata']):
+                # Check if user explicitly asks for another city
+                city_keywords = [
+                    'mumbai', 'delhi', 'bangalore', 'pune', 'chennai', 'kolkata', 
+                    'noida', 'gurgaon', 'gurugram', 'hyderabad', 'ahmedabad', 
+                    'faridabad', 'ghaziabad', 'new delhi'
+                ]
+                
+                # Look for city mentions in the query
+                requested_city = None
+                query_lower = query.lower()
+                
+                # Check for explicit city request patterns
+                for city in city_keywords:
+                    if city in query_lower:
+                        # Use the found city as the filter location instead of current city
+                        requested_city = city
+                        break
+                
+                # If user explicitly asks for another city, use that; otherwise use current city
+                if requested_city:
+                    user_preferences['location'] = requested_city
+                else:
                     user_preferences['location'] = user_current_city
             
             # Build search query - PRIORITIZE USER PREFERENCES
             search_query = query
+            explicit_activity_request = False  # Initialize here for scope
+            activities = []  # Initialize here for scope
             
             # If user has saved preferences, use them to enhance the search
             if user_preferences:
                 print(f"🔍 Processing user preferences: {user_preferences}")
                 # Extract activities from user preferences (from metadata if available)
-                activities = []
                 if 'metadata' in user_preferences:
                     activities_summary = user_preferences.get('metadata', {}).get('activities_summary', '')
                     print(f"📝 Activities summary from metadata: {activities_summary}")
                     # Extract specific activities from the summary
                     if activities_summary:
-                        if 'cricket' in activities_summary.lower():
-                            activities.append('cricket')
-                        if 'football' in activities_summary.lower():
-                            activities.append('football')
-                        if 'badminton' in activities_summary.lower():
-                            activities.append('badminton')
-                        if 'music' in activities_summary.lower():
-                            activities.append('music')
-                        if 'journaling' in activities_summary.lower():
-                            activities.append('journaling')
-                        if 'pickleball' in activities_summary.lower():
-                            activities.append('pickleball')
-                        # Add more activity extraction as needed
+                        # Parse the activities_summary format: "Club|ACTIVITY|City|Area|Count"
+                        import re
+                        activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                        for activity in activity_matches:
+                            activities.append(activity.lower())
+                        
+                        # Fallback: check for common activity keywords
+                        activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
+                                           'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+                                           'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+                                           'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv']
+                        for keyword in activity_keywords:
+                            if keyword.lower() in activities_summary.lower() and keyword.lower() not in activities:
+                                activities.append(keyword.lower())
                 else:
                     activities = user_preferences.get('activities', [])
                 
                 print(f"🎯 Extracted activities: {activities}")
                 
-                # If user has specific activity preferences, prioritize them
-                if activities and ('find events' in query.lower() or 'events for me' in query.lower()):
-                    # User is asking for general events, use their preferences
-                    search_query = ' '.join(activities) + f" {user_current_city}"
-                    print(f"🔎 Using preference-based search query: {search_query}")
+                # ⭐ STRICT PREFERENCE ENFORCEMENT: Use saved activities as default unless explicitly overridden
+                search_city = user_preferences.get('location', user_current_city)
+                
+                # Check if user is explicitly requesting different activities
+                if activities:  # User has saved preferences
+                    # Check if query mentions activities different from saved ones
+                    other_activities = ['football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga', 
+                                      'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+                                      'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking']
+                    for other_activity in other_activities:
+                        if other_activity.lower() in query.lower() and other_activity.lower() not in [a.lower() for a in activities]:
+                            explicit_activity_request = True
+                            search_query = f"{other_activity} {search_city}"
+                            print(f"🎯 User explicitly requested different activity: {other_activity}")
+                            break
+                
+                # If no explicit different activity request, use saved preferences
+                if not explicit_activity_request and activities:
+                    if ('find events' in query.lower() or 'events for me' in query.lower() or 
+                        'show me events' in query.lower() or 'events' == query.lower().strip()):
+                        # Use ONLY saved activity preferences for general requests
+                        search_query = ' '.join(activities) + f" {search_city}"
+                        print(f"🔎 Using SAVED preference-based search query: {search_query}")
+                    elif not any(act.lower() in query.lower() for act in activities):
+                        # Query doesn't mention any of user's preferred activities, still use preferences
+                        search_query = f"{query} " + ' '.join(activities) + f" {search_city}"
+                        print(f"🔎 Enhancing query with saved preferences: {search_query}")
+                    else:
+                        # Query mentions user's preferred activities, keep as is
+                        search_query = f"{query} {search_city}"
+                        print(f"🔎 Query matches preferences, using: {search_query}")
                 elif not search_query:
-                    # No specific query, use preferences
-                    search_query = ' '.join(activities) if activities else ''
-                    if user_current_city:
-                        search_query += f" {user_current_city}"
-                    print(f"🔎 Using default preference search: {search_query}")
+                    # No specific query and no activities, fallback
+                    search_query = f"{query} {search_city}" if query else ''
+                    print(f"🔎 Fallback search: {search_query}")
             
             # Get events
             relevant_events = []
@@ -2405,8 +2511,14 @@ Current user message: {user_message}"""
                     # Parse event start time
                     start_time_str = event.get('start_time', '')
                     if start_time_str:
-                        # Try to parse the datetime string (format: "2025-09-10 15:00")
-                        event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
+                        # Try to parse the datetime string, handling both formats
+                        # Format 1: "2025-09-10 15:00" or Format 2: "2025-09-10 15:00 IST"
+                        try:
+                            # First try with IST suffix
+                            event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M IST")
+                        except ValueError:
+                            # Fallback to format without IST
+                            event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
                         # Only include future events
                         if event_time > current_time:
                             future_events.append(event)
@@ -2423,9 +2535,44 @@ Current user message: {user_message}"""
             relevant_events = future_events
             print(f"📅 Filtered to {len(relevant_events)} future events from {len(relevant_events) + (len(relevant_events) - len(future_events))} total")
             
-            # Filter by current city if provided - WORKS WITH ANY CITY
-            if user_current_city:
-                # Strict city filtering - only show events in current city
+            # ⭐ STRICT ACTIVITY PREFERENCE FILTERING - Only show matching activities unless explicitly overridden
+            if user_preferences and 'metadata' in user_preferences and not explicit_activity_request:
+                activities_summary = user_preferences.get('metadata', {}).get('activities_summary', '')
+                user_preferred_activities = []
+                if activities_summary:
+                    # Extract preferred activities from summary format: "Club|ACTIVITY|City|Area|Count"
+                    import re
+                    activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                    for activity in activity_matches:
+                        user_preferred_activities.append(activity.lower())
+                    
+                    # Fallback: Extract preferred activities from summary
+                    activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga', 
+                                       'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+                                       'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking', 
+                                       'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv']
+                    for keyword in activity_keywords:
+                        if keyword.lower() in activities_summary.lower() and keyword.lower() not in user_preferred_activities:
+                            user_preferred_activities.append(keyword.lower())
+                
+                if user_preferred_activities:
+                    print(f"🔒 Applying strict activity filtering for: {user_preferred_activities}")
+                    activity_filtered_events = []
+                    for event in relevant_events:
+                        event_activity = event.get('activity', '').lower()
+                        # Check if event activity matches any of user's preferred activities
+                        if any(pref_activity in event_activity or event_activity in pref_activity for pref_activity in user_preferred_activities):
+                            activity_filtered_events.append(event)
+                        else:
+                            print(f"🚫 Filtered out non-matching activity: {event.get('activity', '')} for {event.get('name', '')}")
+                    
+                    relevant_events = activity_filtered_events
+                    print(f"🎯 After activity preference filtering: {len(relevant_events)} events remain")
+            
+            # Filter by location (either requested city or current city)
+            filter_city = user_preferences.get('location', user_current_city)
+            if filter_city:
+                # Strict city filtering - only show events in the target city
                 city_filtered = []
                 other_city_events = []
                 
@@ -2449,21 +2596,21 @@ Current user message: {user_message}"""
                     'ghaziabad': ['ghaziabad']
                 }
                 
-                # Get variations for current city
-                current_city_variations = city_variations.get(user_current_city, [user_current_city])
+                # Get variations for the filter city (either requested or current)
+                filter_city_variations = city_variations.get(filter_city, [filter_city])
                 
                 for event in relevant_events:
                     event_city = event.get('city_name', '').lower().strip()
                     
-                    # Check if event city matches any variation of current city
+                    # Check if event city matches any variation of filter city
                     city_match = False
-                    for variation in current_city_variations:
+                    for variation in filter_city_variations:
                         if variation in event_city or event_city in variation:
                             city_match = True
                             break
                     
                     # Also check exact match
-                    if not city_match and (user_current_city in event_city or event_city in user_current_city):
+                    if not city_match and (filter_city in event_city or event_city in filter_city):
                         city_match = True
                     
                     if city_match:
@@ -2480,10 +2627,20 @@ Current user message: {user_message}"""
                     # No events in current city
                     relevant_events = []
             
+            # Handle empty state - if no relevant events found
+            if not relevant_events:
+                return {
+                    "success": False,  # Changed to False to indicate no events found
+                    "recommendations": [],
+                    "total_found": 0,
+                    "message": f"No events found in {filter_city}",
+                    "bot_response": self._generate_no_events_guidance_message(filter_city, query, user_id)
+                }
+            
             # Score and format events
             scored_events = []
             for event in relevant_events:
-                score = self._calculate_match_score_enhanced(event, user_preferences, user_current_city)
+                score = self._calculate_match_score_enhanced(event, user_preferences, filter_city)
                 
                 # Get all possible registration URLs
                 registration_url = (
@@ -2497,9 +2654,16 @@ Current user message: {user_message}"""
                 )
                 
                 if score > 0.2:  # Lower threshold for better coverage
+                    # Get event name with proper fallbacks
+                    event_name = event.get('name', '').strip()
+                    if not event_name:
+                        event_name = event.get('event_name', '').strip()
+                    if not event_name:
+                        event_name = f"{event.get('activity', 'Event')} at {event.get('location_name', 'Venue')}"
+                    
                     event_data = {
                         "event_id": event.get('event_id', ''),
-                        "name": event.get('name', event.get('event_name', '')),
+                        "name": event_name,
                         "club_name": event.get('club_name', ''),
                         "activity": event.get('activity', ''),
                         "start_time": event.get('start_time', ''),
@@ -2525,15 +2689,12 @@ Current user message: {user_message}"""
                 event_data.pop('_score', None)
             top_recommendations = scored_events[:limit]
             
-            # Generate bot response message
-            bot_response = self._generate_natural_response(top_recommendations, query, user_current_city)
-            
             return {
                 "success": True,
                 "recommendations": top_recommendations,
                 "total_found": len(scored_events),
-                "message": f"Found {len(top_recommendations)} events in {user_current_city}" if user_current_city else f"Found {len(top_recommendations)} recommended events",
-                "bot_response": bot_response
+                "message": f"Found {len(top_recommendations)} events in {filter_city}" if filter_city else f"Found {len(top_recommendations)} recommended events"
+                # No bot_response for successful events - use structured data only
             }
             
         except Exception as e:
@@ -2582,14 +2743,20 @@ Current user message: {user_message}"""
         if 'metadata' in preferences:
             activities_summary = preferences.get('metadata', {}).get('activities_summary', '')
             if activities_summary:
-                # Extract specific activities
-                if 'cricket' in activities_summary.lower():
-                    user_activities.append('cricket')
-                if 'football' in activities_summary.lower():
-                    user_activities.append('football')
-                if 'badminton' in activities_summary.lower():
-                    user_activities.append('badminton')
-                # Add more as needed
+                # Extract activities from the summary format: "Club|ACTIVITY|City|Area|Count"
+                import re
+                activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                for activity in activity_matches:
+                    user_activities.append(activity.lower())
+                
+                # Fallback: Extract specific activities
+                activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
+                                   'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+                                   'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+                                   'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv']
+                for keyword in activity_keywords:
+                    if keyword.lower() in activities_summary.lower() and keyword.lower() not in user_activities:
+                        user_activities.append(keyword.lower())
         else:
             user_activities = preferences.get('activities', [])
         
@@ -2653,6 +2820,166 @@ Current user message: {user_message}"""
         
         return ', '.join(reasons).capitalize() if reasons else "Recommended based on your preferences"
 
+    def _generate_no_city_events_message(self, city: str, query: str) -> list:
+        """Message when no events found in requested city"""
+        import random
+        
+        # Extract activity from query for personalized message
+        activity = ""
+        for activity_word in ['quiz', 'drama', 'sports', 'music', 'tech', 'dance', 'comedy', 'art']:
+            if activity_word in query.lower():
+                activity = activity_word
+                break
+        
+        if activity:
+            # Activity-specific empathetic message variations
+            responses = [
+                f"Oh, I checked everywhere for {activity} events in {city.title()} but came up empty today 😊 Want me to check what's happening nearby?",
+                f"Hmm, {city.title()}'s {activity} scene is quiet right now 🤔 How about exploring something different today?",
+                f"Nothing's happening in {city.title()} for {activity} today - but hey, sometimes the best discoveries come from trying something new! ✨",
+                f"Looks like {activity} events in {city.title()} are taking a little break 🌙 Ready to discover a new favorite activity?",
+                f"No {activity} vibes in {city.title()} right now, but I've got some other cool ideas! What do you think? 🎯"
+            ]
+            
+            return random.choice(responses)
+        else:
+            # Generic city message without specific activity - more conversational
+            responses = [
+                f"Hmm, that's a tough one to find in {city.title()} right now 🤷‍♀️ What else sounds fun to you?",
+                f"Nothing's popping up for that in {city.title()} today. Tell me more about what you're in the mood for?",
+                f"Oh, I'm not seeing anything like that in {city.title()} right now. What would make your perfect day out?",
+                f"Looks like {city.title()} doesn't have what you're looking for today. Want to try a different angle? 🎯",
+                f"That's not showing up in {city.title()} right now 😊 What kind of vibe are you going for instead?"
+            ]
+            
+            return random.choice(responses)
+    
+    def _generate_no_preferences_message(self, city: str) -> list:
+        """Message when user has no saved preferences"""
+        import random
+        
+        openings = [
+            f"Hey! I'd love to help you discover amazing events in {city.title()}! 🎉",
+            f"Hi there! Ready to explore what {city.title()} has to offer? 🌟",
+            f"Welcome! Let's find you some fantastic events in {city.title()}! 🚀"
+        ]
+        
+        endings = [
+            f"Just tell me what you're into and I'll find some amazing events for you!",
+            f"Share your interests and I'll discover the perfect activities! ✨",
+            f"Let me know what excites you and I'll match you with great events! 🎯"
+        ]
+        
+        opening = random.choice(openings)
+        ending = random.choice(endings)
+        
+        return [
+            opening,
+            "To find the perfect matches for you, tell me:",
+            "What do you enjoy? (sports, music, comedy, tech talks, art...)",
+            "When are you free? (weekends, evenings, mornings...)",
+            "What's your vibe? (chill hangouts, competitive games, learning something new...)",
+            ending
+        ]
+    
+    def _generate_vague_search_message(self, city: str) -> list:
+        """Message when search query is too vague"""
+        import random
+        
+        responses = [
+            "Tell me more! What kind of vibe are you going for? 😊",
+            "I need a bit more to work with - what sounds fun to you right now? 🎯",
+            "What would make your perfect day out? Give me some hints! ✨",
+            "Hmm, help me out here - what's your mood today? Adventurous? Chill? Creative? 🤔",
+            "I want to find you something amazing! What are you feeling like doing? 🎆",
+            "You know what? Let's get specific! What kind of experience are you after? 🎭"
+        ]
+        
+        return random.choice(responses)
+    
+    def _generate_no_time_match_message(self, city: str, time_constraint: str) -> list:
+        """Message when no events match time preferences"""
+        import random
+        
+        responses = [
+            f"I get it, {time_constraint} works best for you. Nothing's scheduled then, but I've got some other great times that might work! 😊",
+            f"Your {time_constraint} is precious - while nothing's happening then, how about these other options? ⏰",
+            f"Ah, {time_constraint} person! I respect that. Let me show you what's available at other times 🌅",
+            f"I totally understand the {time_constraint} preference! Here are some flexible alternatives that might fit 🏃‍♂️",
+            f"No {time_constraint} events right now, but don't worry - I found some other awesome timing options! ✨"
+        ]
+        
+        return random.choice(responses)
+    
+    def _generate_budget_constraint_message(self, city: str, budget: str) -> list:
+        """Message when no events within budget"""
+        import random
+        
+        responses = [
+            f"I totally understand wanting to keep it affordable! Nothing under {budget} right now, but I've got some wallet-friendly alternatives 💰",
+            f"Being smart with money - I respect that! While {budget} events aren't available, here are some great budget options 😊",
+            f"Hey, I get it - budget matters! No {budget} events today, but let me show you what's doable 🤝",
+            f"Love that you're being budget-conscious! Nothing in the {budget} range, but I found some affordable gems 💎",
+            f"Smart budgeting! While {budget} events aren't happening, I've got some reasonably-priced options that might work 🎯"
+        ]
+        
+        return random.choice(responses)
+    
+    def _generate_generic_empty_message(self, city: str) -> list:
+        """Generic friendly message for empty results"""
+        import random
+        
+        responses = [
+            "Hmm, that's a tough one to find right now 🤷‍♀️ Let me think of something else you might enjoy...",
+            "You know what? Let's try a different angle - what kind of experience are you after? 🎭",
+            "That's not showing up for me today 😊 What would make your perfect day out?",
+            "Let me think outside the box here! What sounds fun to you right now? ✨",
+            "Hmm, nothing's coming up for that specific thing. Tell me more about what you're feeling like doing? 🎯",
+            "That's a tricky one! How about we explore what else might spark your interest? 🚀"
+        ]
+        
+        return random.choice(responses)
+
+    def _generate_no_events_guidance_message(self, city: str, query: str, user_id: str = None):
+        """Generate helpful guidance when no events are found"""
+        
+        # Check if user has preferences saved
+        if user_id:
+            try:
+                user_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
+                if not user_prefs:
+                    message_list = self._generate_no_preferences_message(city)
+                    return message_list  # Return list directly
+            except:
+                pass
+        
+        # Determine the type of null state based on query and context
+        query_lower = query.lower()
+        
+        # Check if it's a city-specific request (either explicit in query OR when user requested different city)
+        if any(city_name in query_lower for city_name in ['noida', 'gurgaon', 'delhi', 'mumbai', 'bangalore', 'pune', 'chennai']):
+            return self._generate_no_city_events_message(city, query)
+        
+        # If no events found for a specific requested city, also use city-specific message
+        if city and city.lower() in ['noida', 'gurgaon', 'delhi', 'mumbai', 'bangalore', 'pune', 'chennai']:
+            return self._generate_no_city_events_message(city, query)
+        
+        # Check if it's too vague
+        if len(query.split()) <= 2 or query_lower in ['events', 'find events', 'show me events']:
+            return self._generate_vague_search_message(city)
+        
+        # Check for time constraints
+        if any(time_word in query_lower for time_word in ['morning', 'evening', 'weekend', 'weekday']):
+            time_constraint = next(word for word in ['morning', 'evening', 'weekend', 'weekday'] if word in query_lower)
+            return self._generate_no_time_match_message(city, time_constraint)
+        
+        # Check for budget constraints
+        if any(budget_word in query_lower for budget_word in ['free', 'cheap', 'budget', 'under']):
+            return self._generate_budget_constraint_message(city, "₹200")
+        
+        # Default to generic friendly message
+        return self._generate_generic_empty_message(city)
+    
     def _generate_natural_response(self, events: list, query: str, current_city: str) -> str:
         """Generate natural language response for UI"""
         if not events:
@@ -2664,11 +2991,25 @@ Current user message: {user_message}"""
         response += ":\n\n"
         
         for i, event in enumerate(events[:3], 1):  # Show top 3
-            response += f"{i}. 🎉 **{event['name']}**\n"
-            response += f"   📍 {event['location']['venue']}, {event['location']['area']}\n"
-            response += f"   ⏰ {event['start_time']} to {event['end_time']}\n"
-            response += f"   💰 ₹{event['price']}\n"
-            response += f"   🔗 Register: {event['registration_url']}\n\n"
+            # Get event name with fallbacks
+            event_name = event.get('name', '').strip()
+            if not event_name or event_name == '****':
+                event_name = event.get('event_name', '').strip()
+            if not event_name:
+                event_name = event.get('activity', 'Event').strip()
+            if not event_name:
+                event_name = f"Event at {event.get('location', {}).get('venue', 'Venue')}"
+            
+            # Get location details with fallbacks
+            location = event.get('location', {})
+            venue = location.get('venue', 'Venue TBD')
+            area = location.get('area', 'Area TBD')
+            
+            response += f"{i}. 🎉 **{event_name}**\n"
+            response += f"   📍 {venue}, {area}\n"
+            response += f"   ⏰ {event.get('start_time', 'Time TBD')} to {event.get('end_time', 'End TBD')}\n"
+            response += f"   💰 ₹{event.get('price', 0)}\n"
+            response += f"   🔗 Register: {event.get('registration_url', 'Contact organizer')}\n\n"
         
         if len(events) > 3:
             response += f"...and {len(events) - 3} more great options!"
@@ -2676,18 +3017,34 @@ Current user message: {user_message}"""
         return response
 
     def get_bot_response_json(self, user_message: str, user_id: str = None) -> str:
-        """Get bot response in JSON-friendly format"""
+        """Get bot response in JSON-friendly format with user-specific context"""
         try:
-            # If user_id is provided, include it in the message context
+            # Add message to user's conversation history
+            self._add_to_user_conversation(user_id, "user", user_message)
+            
+            # Get user-specific context for the AI
+            user_history = self._get_user_conversation_history(user_id)
+            
+            # Create context with user's conversation history
+            history_context = "\nConversation History:\n"
+            for msg in user_history[-6:]:  # Last 6 messages
+                history_context += f"{msg['role']}: {msg['content']}\n"
+            
+            # Create enhanced message with user context
             if user_id:
                 enhanced_message = f"[User ID: {user_id}] {user_message}"
             else:
                 enhanced_message = user_message
             
-            # Call get_bot_response with just the message
+            # For now, use the old method but with enhanced context
+            # TODO: Create a proper user-context aware bot response method
             response = self.get_bot_response(enhanced_message)
-            # Clean up any console formatting
-            return response.replace("Miffy: ", "").strip()
+            
+            # Add response to user's conversation history
+            clean_response = response.replace("Miffy: ", "").strip()
+            self._add_to_user_conversation(user_id, "assistant", clean_response)
+            
+            return clean_response
         except Exception as e:
             return f"Sorry, I encountered an error: {str(e)}"
     
@@ -2703,10 +3060,30 @@ Current user message: {user_message}"""
             if result.get("recommendations"):  # Check if we have recommendations regardless of success flag
                 validated_events = []
                 for event in result.get("recommendations", []):
+                    # Skip events that have AI reasoning text in the name
+                    event_name = str(event.get('name', event.get('event_name', '')))
+                    
+                    # Filter out events with AI reasoning patterns
+                    if any(pattern in event_name.lower() for pattern in [
+                        '**', 'not a match', 'exclude', 'skip', 'perfect!', 'wait,',
+                        'though', 'might not fit', 'so this', 'so exclude'
+                    ]):
+                        continue  # Skip this event as it contains AI reasoning
+                    
+                    # Apply same name fallback logic as in get_recommendations_json
+                    if not event_name:
+                        event_name = event.get('event_name', '').strip()
+                    if not event_name:
+                        event_name = f"{event.get('activity', 'Event')} at {event.get('location', {}).get('venue', 'Venue')}"
+                    
+                    # Only include events with proper data (allow generated names)
+                    if not event_name or event_name in ['Unknown']:
+                        continue
+                    
                     # Ensure all required fields are present
                     validated_event = {
                         "event_id": str(event.get('event_id', '')),
-                        "name": str(event.get('name', event.get('event_name', 'Unnamed Event'))),
+                        "name": event_name,
                         "club_name": str(event.get('club_name', 'Unknown Club')),
                         "activity": str(event.get('activity', 'General')),
                         "start_time": str(event.get('start_time', '')),
@@ -2719,58 +3096,26 @@ Current user message: {user_message}"""
                     
                     # Ensure location is properly structured
                     if not isinstance(validated_event['location'], dict):
-                        # If location is not a dict, create empty dict
                         validated_event['location'] = {}
                     
-                    # Only add fields if they don't exist and we have data
-                    # Don't add TBD - let the frontend handle missing data
-                    
                     validated_events.append(validated_event)
                 
+                # Update result with clean, validated events
                 result["recommendations"] = validated_events
-                result["success"] = True  # Set success to True if we have recommendations
                 result["total_found"] = len(validated_events)
+                
+                # If we filtered out all events (they were all AI reasoning), 
+                # treat as no results found
+                if not validated_events:
+                    result["success"] = False
+                    result["message"] = result.get("bot_response", "No events found")
+                else:
+                    result["success"] = True
+                
                 return result
             
-            # If no recommendations from DB, try getting from AI response
-            user_message = request_data.get('query', '')
-            user_id = request_data.get('user_id')
-            if user_message and not result.get("recommendations"):
-                # Include user ID in the message for context
-                if user_id:
-                    enhanced_message = f"[User ID: {user_id}] {user_message}"
-                else:
-                    enhanced_message = user_message
-                # Get AI response with user context
-                ai_response = self.get_bot_response(enhanced_message)
-                
-                # Extract events from AI response
-                extracted_events = self.extract_events_from_response(
-                    ai_response, 
-                    result.get("recommendations", [])
-                )
-                
-                # Validate extracted events
-                validated_events = []
-                for event in extracted_events:
-                    validated_event = {
-                        "event_id": str(event.get('event_id', '')),
-                        "name": str(event.get('name', 'Unnamed Event')),
-                        "club_name": str(event.get('club_name', 'Unknown')),
-                        "activity": str(event.get('activity', 'General')),
-                        "start_time": str(event.get('start_time', '')),
-                        "end_time": str(event.get('end_time', '')),
-                        "location": event.get('location', {}),
-                        "price": self._safe_float(event.get('price', 0)),
-                        "available_spots": self._safe_int(event.get('available_spots', 0)),
-                        "registration_url": str(event.get('registration_url', 'Contact organizer'))
-                    }
-                    validated_events.append(validated_event)
-                
-                # Update result with validated events
-                result["recommendations"] = validated_events
-                result["total_found"] = len(validated_events)
-                
+            # If no recommendations from DB, return the result as-is (no AI fallback)
+            # This prevents AI reasoning text from being included in responses
             return result
             
         except Exception as e:
@@ -2817,9 +3162,11 @@ if __name__ == "__main__":
     if existing_events > 0:
         print(f"✅ Found {existing_events} events in ChromaDB! Using existing data.")
         print("🔄 Running incremental sync to get latest updates...")
+        print("📞 This will call /updated API to get latest changes")
         bot.sync_events_once(full_sync=False)  # Incremental sync to get updates
     else:
         print("❌ No existing events found. Running full initial sync...")
+        print("📞 This will call /upcoming API to load all current events")
         bot.sync_events_once(full_sync=True)  # Full sync for first time
         time.sleep(2)
 
@@ -2891,6 +3238,11 @@ if __name__ == "__main__":
         print("4. bot.sync_events_once(full_sync=True) - Run full sync (clears existing)")
         print("\nNow preserves existing event data and uses incremental updates!")
         print("Periodic sync focuses on '/updated' API for efficient updates every 2 minutes.")
+        print("\n📞 API Call Pattern:")
+        print("• Server START (no events) → /upcoming API (gets all current events)")
+        print("• Server START (has events) → /updated API (gets recent changes)")
+        print("• Every 2 minutes → /updated API (incremental sync)")
+        print("• Manual full sync → /upcoming + /updated APIs (complete refresh)")
         
         print("\n📋 User Preferences CSV Import Methods:")
         print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")

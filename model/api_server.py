@@ -102,6 +102,7 @@ class ChatResponse(BaseModel):
     events: List[EventRecommendation] = []
     total_found: int = 0
     needs_preferences: bool = False  # Flag to trigger preference collection
+    bot_response: Optional[str] = None
 
 class UserPreferenceRequest(BaseModel):
     user_id: str
@@ -146,18 +147,25 @@ async def startup_event():
     try:
         bot = get_bot()
         stats = bot.chroma_manager.get_collection_stats()
-        print(f"✅ Bot initialized with {stats.get('total_events', 0)} events")
+        existing_events = stats.get('total_events', 0)
+        print(f"✅ Bot initialized with {existing_events} existing events")
         
-        # Start periodic sync to update events every 2 minutes
+        # Determine if we need full sync (first time) or incremental sync
+        if existing_events == 0:
+            print("🔄 No existing events found. Running FULL initial sync...")
+            print("📞 This will call /upcoming API to load all current events")
+            bot.event_sync_manager.run_single_sync(full_sync=True)  # Calls /upcoming + /updated APIs
+        else:
+            print("🔄 Found existing events. Running incremental sync...")
+            print("📞 This will call /updated API to get latest changes")
+            bot.event_sync_manager.run_single_sync(full_sync=False)  # Only calls /updated API
+        
+        # Start periodic incremental sync (every 2 minutes) - only /updated API
         if not bot.event_sync_manager.is_running:
             bot.event_sync_manager.start_periodic_sync(interval_minutes=2)
-            print("🔄 Started automatic event sync (every 2 minutes)")
+            print("🔄 Started automatic incremental sync (/updated API every 2 minutes)")
         else:
             print("✅ Event sync is already running")
-            
-        # Run an immediate sync to get latest events
-        print("🔄 Running initial sync to get latest events...")
-        bot.event_sync_manager.run_single_sync(full_sync=False)
         
     except Exception as e:
         print(f"⚠️  Warning: Bot initialization failed: {str(e)}")
@@ -263,17 +271,15 @@ async def chat_with_bot(request: ChatRequest):
             traceback.print_exc()
             result = {"success": False, "recommendations": [], "total_found": 0, "message": str(e)}
         
-        # Check if user has preferences
-        user_prefs = bot.chroma_manager.get_user_preferences_by_user_id(request.user_id)
-        needs_prefs = user_prefs is None
-        
-        if needs_prefs and any(keyword in request.message.lower() for keyword in ["find", "recommend", "suggest", "event"]):
+        # Check if AI agent is requesting preferences
+        if result.get("needs_preferences", False):
             return ChatResponse(
                 success=True,
-                message="I'd love to help you find events! To give you personalized recommendations, could you tell me what activities and interests you enjoy?",
+                message=result.get("message", "I'd love to help you find events! To give you personalized recommendations, could you tell me what activities and interests you enjoy?"),
                 events=[],
                 total_found=0,
-                needs_preferences=True
+                needs_preferences=True,
+                bot_response=result.get("bot_response")
             )
         
         # Generate clean, structured response
@@ -297,12 +303,15 @@ async def chat_with_bot(request: ChatRequest):
                 needs_preferences=False
             )
         else:
+            # Use bot_response if available (helpful guidance), otherwise fall back to generic message
+            message = result.get("message") or "I'm having trouble finding events right now. Please try again."
             return ChatResponse(
                 success=False,
-                message="I'm having trouble finding events right now. Please try again.",
+                message=message,
                 events=[],
-                total_found=0,
-                needs_preferences=False
+                total_found=result.get("total_found", 0),
+                needs_preferences=False,
+                bot_response=result.get("bot_response")
             )
         
     except Exception as e:
@@ -571,20 +580,27 @@ async def websocket_chat(websocket: WebSocket):
             # Prepare clean structured response
             events = recommendations_result.get("recommendations", [])[:3]
             
-            # Generate simple, clean message
+            # Generate interactive response
             if events:
-                message = f"Found {len(events)} event{'s' if len(events) > 1 else ''} for you in {user_current_city}!"
+                message = f"Found {len(events)} event{'s' if len(events) > 1 else ''} for you!"
+                bot_response = None  # No additional guidance needed when events found
+                success = True
             elif recommendations_result.get("success", False):
-                message = f"No events found matching your criteria in {user_current_city}. Try different keywords or check nearby cities."
+                message = "No events found matching your criteria."
+                bot_response = recommendations_result.get("bot_response", "Try different keywords or check nearby cities.")
+                success = False  # No events found
             else:
-                message = "I'm having trouble finding events right now. Please try again."
+                message = "No events found."
+                bot_response = recommendations_result.get("bot_response", "I'm having trouble finding events right now. Please try again.")
+                success = False
 
             response_data = {
                 "type": "response",
-                "success": True,
+                "success": success,
                 "message": message,
                 "recommendations": events,
-                "total_found": recommendations_result.get("total_found", 0)
+                "total_found": recommendations_result.get("total_found", 0),
+                "bot_response": bot_response  # Include interactive guidance
             }
             
             await websocket.send_json(response_data)
