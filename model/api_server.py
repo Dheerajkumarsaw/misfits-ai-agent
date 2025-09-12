@@ -102,7 +102,6 @@ class ChatResponse(BaseModel):
     events: List[EventRecommendation] = []
     total_found: int = 0
     needs_preferences: bool = False  # Flag to trigger preference collection
-    bot_response: Optional[str] = None
 
 class UserPreferenceRequest(BaseModel):
     user_id: str
@@ -122,7 +121,6 @@ class RecommendationResponse(BaseModel):
     recommendations: List[EventRecommendation]
     total_found: int
     message: str
-    bot_response: Optional[str] = None  # Natural language response for UI
 
 # Initialize bot instance (singleton)
 bot_instance = None
@@ -232,8 +230,7 @@ async def get_recommendations(request: RecommendationRequest):
             success=True,
             recommendations=result["recommendations"],
             total_found=result["total_found"],
-            message=result["message"],
-            bot_response=result.get("bot_response")  # Natural language response
+            message=result["message"]
         )
         
         return response
@@ -278,8 +275,7 @@ async def chat_with_bot(request: ChatRequest):
                 message=result.get("message", "I'd love to help you find events! To give you personalized recommendations, could you tell me what activities and interests you enjoy?"),
                 events=[],
                 total_found=0,
-                needs_preferences=True,
-                bot_response=result.get("bot_response")
+                needs_preferences=True
             )
         
         # Generate clean, structured response
@@ -303,15 +299,14 @@ async def chat_with_bot(request: ChatRequest):
                 needs_preferences=False
             )
         else:
-            # Use bot_response if available (helpful guidance), otherwise fall back to generic message
+            # Use message from the result, with fallback to generic message
             message = result.get("message") or "I'm having trouble finding events right now. Please try again."
             return ChatResponse(
                 success=False,
                 message=message,
                 events=[],
                 total_found=result.get("total_found", 0),
-                needs_preferences=False,
-                bot_response=result.get("bot_response")
+                needs_preferences=False
             )
         
     except Exception as e:
@@ -332,7 +327,7 @@ async def simple_chat(request: ChatRequest):
     try:
         bot = get_bot()
         
-        # Get natural language response with user context
+        # Get natural language response with user context  
         chat_response = bot.get_bot_response_json(request.message, request.user_id)
         
         # For queries about events, also get quick recommendations
@@ -583,24 +578,20 @@ async def websocket_chat(websocket: WebSocket):
             # Generate interactive response
             if events:
                 message = f"Found {len(events)} event{'s' if len(events) > 1 else ''} for you!"
-                bot_response = None  # No additional guidance needed when events found
                 success = True
             elif recommendations_result.get("success", False):
-                message = "No events found matching your criteria."
-                bot_response = recommendations_result.get("bot_response", "Try different keywords or check nearby cities.")
+                message = recommendations_result.get("message", "No events found matching your criteria.")
                 success = False  # No events found
             else:
-                message = "No events found."
-                bot_response = recommendations_result.get("bot_response", "I'm having trouble finding events right now. Please try again.")
+                message = recommendations_result.get("message", "No events found.")
                 success = False
 
             response_data = {
-                "type": "response",
+                "type": "response", 
                 "success": success,
                 "message": message,
                 "recommendations": events,
-                "total_found": recommendations_result.get("total_found", 0),
-                "bot_response": bot_response  # Include interactive guidance
+                "total_found": recommendations_result.get("total_found", 0)
             }
             
             await websocket.send_json(response_data)

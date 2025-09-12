@@ -2392,47 +2392,78 @@ Current user message: {user_message}"""
                             "recommendations": [],
                             "total_found": 0,
                             "message": "I'd love to help you find events! To give you personalized recommendations, please tell me what activities and interests you enjoy.",
-                            "needs_preferences": True,
-                            "bot_response": "Since this is our first time working together, I'd love to learn about your interests! What activities get you excited? (sports, arts, tech, music, etc.)"
+                            "needs_preferences": True
                         }
             
             # Override with provided preferences
             if override_preferences:
                 user_preferences.update(override_preferences)
             
-            # IMPORTANT: Set current city as primary location filter
+            # IMPORTANT: Set location filter based on explicit request or current city
             if user_current_city:
                 user_preferences['current_city'] = user_current_city
-                # Check if user explicitly asks for another city
-                city_keywords = [
-                    'mumbai', 'delhi', 'bangalore', 'pune', 'chennai', 'kolkata', 
-                    'noida', 'gurgaon', 'gurugram', 'hyderabad', 'ahmedabad', 
-                    'faridabad', 'ghaziabad', 'new delhi'
-                ]
-                
-                # Look for city mentions in the query
-                requested_city = None
-                query_lower = query.lower()
-                
-                # Check for explicit city request patterns
-                for city in city_keywords:
-                    if city in query_lower:
-                        # Use the found city as the filter location instead of current city
-                        requested_city = city
-                        break
-                
-                # If user explicitly asks for another city, use that; otherwise use current city
-                if requested_city:
-                    user_preferences['location'] = requested_city
-                else:
-                    user_preferences['location'] = user_current_city
+                # Location will be determined later in the new logic based on explicit city requests
             
-            # Build search query - PRIORITIZE USER PREFERENCES
+            # Build search query - PRIORITIZE CURRENT REQUEST OVER SAVED PREFERENCES
             search_query = query
-            explicit_activity_request = False  # Initialize here for scope
-            activities = []  # Initialize here for scope
+            explicit_activity_request = False
+            explicit_city_request = False
+            activities = []  # Saved activities from preferences
             
-            # If user has saved preferences, use them to enhance the search
+            # Comprehensive activity and city lists
+            all_activities = ['football', 'soccer', 'cricket', 'badminton', 'tennis', 'basketball', 'volleyball',
+                            'swimming', 'gym', 'yoga', 'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 
+                            'cycling', 'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+                            'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv', 'sports', 'fitness']
+            
+            city_keywords = ['mumbai', 'delhi', 'bangalore', 'bengaluru', 'pune', 'chennai', 'kolkata',
+                           'noida', 'gurgaon', 'gurugram', 'hyderabad', 'ahmedabad', 'faridabad', 'ghaziabad',
+                           'new delhi', 'bombay', 'madras', 'calcutta']
+            
+            # Activity mapping for better matching - maps user request to database activities
+            activity_mappings = {
+                'football': ['football', 'soccer', 'sports', 'outdoor_sports'],
+                'soccer': ['football', 'soccer', 'sports'],
+                'cricket': ['cricket', 'sports', 'outdoor_sports'],
+                'badminton': ['badminton', 'sports', 'indoor_sports'],
+                'tennis': ['tennis', 'sports', 'outdoor_sports'],
+                'basketball': ['basketball', 'sports', 'outdoor_sports'],
+                'volleyball': ['volleyball', 'sports', 'outdoor_sports'],
+                'swimming': ['swimming', 'sports', 'fitness'],
+                'gym': ['gym', 'fitness', 'workout'],
+                'yoga': ['yoga', 'fitness', 'wellness'],
+                'dance': ['dance', 'arts', 'fitness'],
+                'music': ['music', 'arts', 'entertainment'],
+                'art': ['art', 'arts', 'creative'],
+                'tech': ['tech', 'technology', 'coding', 'startup'],
+                'coding': ['coding', 'tech', 'technology', 'programming'],
+                'quiz': ['quiz', 'trivia', 'knowledge'],
+                'drama': ['drama', 'theater', 'theatre', 'acting'],
+                'theater': ['theater', 'theatre', 'drama', 'acting'],
+                'sports': ['sports', 'football', 'cricket', 'badminton', 'tennis', 'basketball']
+            }
+            
+            # STEP 1: Extract explicitly mentioned activities and cities from current query
+            query_lower = query.lower()
+            explicit_activities = []
+            explicit_city = None
+            
+            # Find explicitly mentioned activities
+            for activity in all_activities:
+                if activity in query_lower:
+                    explicit_activities.append(activity)
+                    explicit_activity_request = True
+                    print(f"🎯 Found explicit activity in query: {activity}")
+            
+            # Find explicitly mentioned city
+            for city in city_keywords:
+                if city in query_lower:
+                    explicit_city = city
+                    explicit_city_request = True
+                    print(f"🏙️ Found explicit city in query: {city}")
+                    break
+            
+            # STEP 2: Get saved preferences if available
             if user_preferences:
                 print(f"🔍 Processing user preferences: {user_preferences}")
                 # Extract activities from user preferences (from metadata if available)
@@ -2447,54 +2478,65 @@ Current user message: {user_message}"""
                         for activity in activity_matches:
                             activities.append(activity.lower())
                         
-                        # Fallback: check for common activity keywords
-                        activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
-                                           'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
-                                           'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
-                                           'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv']
-                        for keyword in activity_keywords:
+                        # Fallback: check for common activity keywords in summary
+                        for keyword in all_activities:
                             if keyword.lower() in activities_summary.lower() and keyword.lower() not in activities:
                                 activities.append(keyword.lower())
                 else:
                     activities = user_preferences.get('activities', [])
                 
-                print(f"🎯 Extracted activities: {activities}")
-                
-                # ⭐ STRICT PREFERENCE ENFORCEMENT: Use saved activities as default unless explicitly overridden
-                search_city = user_preferences.get('location', user_current_city)
-                
-                # Check if user is explicitly requesting different activities
-                if activities:  # User has saved preferences
-                    # Check if query mentions activities different from saved ones
-                    other_activities = ['football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga', 
-                                      'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
-                                      'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking']
-                    for other_activity in other_activities:
-                        if other_activity.lower() in query.lower() and other_activity.lower() not in [a.lower() for a in activities]:
-                            explicit_activity_request = True
-                            search_query = f"{other_activity} {search_city}"
-                            print(f"🎯 User explicitly requested different activity: {other_activity}")
-                            break
-                
-                # If no explicit different activity request, use saved preferences
-                if not explicit_activity_request and activities:
-                    if ('find events' in query.lower() or 'events for me' in query.lower() or 
-                        'show me events' in query.lower() or 'events' == query.lower().strip()):
-                        # Use ONLY saved activity preferences for general requests
-                        search_query = ' '.join(activities) + f" {search_city}"
-                        print(f"🔎 Using SAVED preference-based search query: {search_query}")
-                    elif not any(act.lower() in query.lower() for act in activities):
-                        # Query doesn't mention any of user's preferred activities, still use preferences
-                        search_query = f"{query} " + ' '.join(activities) + f" {search_city}"
-                        print(f"🔎 Enhancing query with saved preferences: {search_query}")
-                    else:
-                        # Query mentions user's preferred activities, keep as is
-                        search_query = f"{query} {search_city}"
-                        print(f"🔎 Query matches preferences, using: {search_query}")
-                elif not search_query:
-                    # No specific query and no activities, fallback
-                    search_query = f"{query} {search_city}" if query else ''
-                    print(f"🔎 Fallback search: {search_query}")
+                print(f"💾 Saved activities: {activities}")
+            
+            # STEP 3: Determine search city priority
+            if explicit_city:
+                search_city = explicit_city
+                print(f"🏙️ Using explicitly requested city: {explicit_city}")
+            elif user_current_city:
+                search_city = user_current_city
+                print(f"📍 Using current city: {user_current_city}")
+            else:
+                search_city = user_preferences.get('location', '') if user_preferences else ''
+                print(f"💾 Using saved location preference: {search_city}")
+            
+            # STEP 4: Build search query based on priority
+            is_generic_request = any(phrase in query_lower for phrase in [
+                'find events', 'show me events', 'events for me', 'recommend events',
+                'suggest events', 'looking for events', 'what events'
+            ]) or query_lower.strip() == 'events'
+            
+            if explicit_activities:
+                # User explicitly requested specific activities - highest priority
+                search_query = ' '.join(explicit_activities)
+                if search_city:
+                    search_query += f" {search_city}"
+                print(f"🎯 Using EXPLICIT activity request: {search_query}")
+            elif explicit_city and not explicit_activities:
+                # User asked for different city but no specific activity
+                if activities and is_generic_request:
+                    # Use saved activity preferences with requested city
+                    search_query = ' '.join(activities) + f" {explicit_city}"
+                    print(f"🏙️ Using saved activities with explicit city: {search_query}")
+                else:
+                    # Generic events in requested city
+                    search_query = f"events {explicit_city}"
+                    print(f"🏙️ Generic events in explicit city: {search_query}")
+            elif is_generic_request and activities:
+                # Generic request like "show me events" - use saved preferences
+                search_query = ' '.join(activities)
+                if search_city:
+                    search_query += f" {search_city}"
+                print(f"💾 Using SAVED preference-based search query: {search_query}")
+            else:
+                # Default: use query as-is with appropriate city
+                search_query = query
+                if search_city and search_city not in query_lower:
+                    search_query += f" {search_city}"
+                print(f"🔎 Using original query with city: {search_query}")
+            
+            # Set location preference based on search_city determined above
+            if search_city:
+                user_preferences['location'] = search_city
+                print(f"📍 Set location preference to: {search_city}")
             
             # Get events
             relevant_events = []
@@ -2535,8 +2577,59 @@ Current user message: {user_message}"""
             relevant_events = future_events
             print(f"📅 Filtered to {len(relevant_events)} future events from {len(relevant_events) + (len(relevant_events) - len(future_events))} total")
             
-            # ⭐ STRICT ACTIVITY PREFERENCE FILTERING - Only show matching activities unless explicitly overridden
-            if user_preferences and 'metadata' in user_preferences and not explicit_activity_request:
+            # ⭐ EXPLICIT ACTIVITY VALIDATION - When user explicitly requests activities, validate results match
+            if explicit_activity_request and explicit_activities:
+                print(f"🔍 Validating events match explicit request: {explicit_activities}")
+                matched_events = []
+                
+                for event in relevant_events:
+                    event_activity = event.get('activity', '').lower()
+                    event_matches = False
+                    
+                    # Check if event matches any requested activity
+                    for requested_activity in explicit_activities:
+                        # Direct match
+                        if requested_activity.lower() in event_activity or event_activity in requested_activity.lower():
+                            event_matches = True
+                            print(f"✅ Direct match: {event.get('name', '')} - {event_activity} matches {requested_activity}")
+                            break
+                        
+                        # Check through activity mappings
+                        mapped_activities = activity_mappings.get(requested_activity.lower(), [])
+                        for mapped_activity in mapped_activities:
+                            if mapped_activity.lower() in event_activity or event_activity in mapped_activity.lower():
+                                event_matches = True
+                                print(f"✅ Mapped match: {event.get('name', '')} - {event_activity} matches {requested_activity} via {mapped_activity}")
+                                break
+                        
+                        if event_matches:
+                            break
+                    
+                    if event_matches:
+                        matched_events.append(event)
+                    else:
+                        print(f"❌ No match: {event.get('name', '')} - {event_activity} doesn't match {explicit_activities}")
+                
+                relevant_events = matched_events
+                print(f"🎯 After explicit activity validation: {len(relevant_events)} events remain")
+                
+                # If no events match the explicit request, return appropriate message
+                if len(relevant_events) == 0:
+                    requested_activities_str = ', '.join(explicit_activities)
+                    # Use the guidance message generator for better response
+                    guidance_message = self._generate_no_events_guidance_message_for_activity(
+                        search_city, requested_activities_str, user_id
+                    )
+                    return {
+                        "success": True,
+                        "recommendations": [],
+                        "total_found": 0,
+                        "message": guidance_message,  # Use guidance directly as message
+                        "user_preferences_used": user_preferences
+                    }
+            
+            # ⭐ SMART ACTIVITY PREFERENCE FILTERING - Only apply for generic requests, not explicit ones
+            if user_preferences and 'metadata' in user_preferences and not explicit_activity_request and not explicit_city_request:
                 activities_summary = user_preferences.get('metadata', {}).get('activities_summary', '')
                 user_preferred_activities = []
                 if activities_summary:
@@ -2629,15 +2722,66 @@ Current user message: {user_message}"""
             
             # Handle empty state - if no relevant events found
             if not relevant_events:
+                guidance_message = self._generate_no_events_guidance_message(filter_city, query, user_id)
                 return {
                     "success": False,  # Changed to False to indicate no events found
                     "recommendations": [],
                     "total_found": 0,
-                    "message": f"No events found in {filter_city}",
-                    "bot_response": self._generate_no_events_guidance_message(filter_city, query, user_id)
+                    "message": guidance_message  # Use guidance directly, no bot_response
                 }
             
-            # Score and format events
+            # For explicit requests, skip scoring - user knows exactly what they want
+            if explicit_activity_request and explicit_activities:
+                print(f"🚀 Explicit request detected - bypassing scoring for: {explicit_activities}")
+                formatted_events = []
+                
+                for event in relevant_events[:limit]:  # Take up to limit events directly
+                    # Get all possible registration URLs
+                    registration_url = (
+                        event.get('event_url') or
+                        event.get('registration_url') or
+                        event.get('signup_url') or
+                        event.get('booking_url') or
+                        event.get('link') or
+                        event.get('url') or
+                        "Contact organizer for registration"
+                    )
+                    
+                    # Get event name with proper fallbacks
+                    event_name = event.get('name', '').strip()
+                    if not event_name:
+                        event_name = event.get('event_name', '').strip()
+                    if not event_name:
+                        event_name = f"{event.get('activity', 'Event')} at {event.get('location_name', 'Venue')}"
+                    
+                    event_data = {
+                        "event_id": event.get('event_id', ''),
+                        "name": event_name,
+                        "club_name": event.get('club_name', ''),
+                        "activity": event.get('activity', ''),
+                        "start_time": event.get('start_time', ''),
+                        "end_time": event.get('end_time', ''),
+                        "location": {
+                            "venue": event.get('location_name', ''),
+                            "area": event.get('area_name', ''),
+                            "city": event.get('city_name', ''),
+                            "full_address": f"{event.get('location_name', '')}, {event.get('area_name', '')}, {event.get('city_name', '')}"
+                        },
+                        "price": self._safe_float(event.get('ticket_price', 0)),
+                        "available_spots": self._safe_int(event.get('available_spots', 0)),
+                        "registration_url": registration_url
+                    }
+                    formatted_events.append(event_data)
+                
+                requested_activities_str = ', '.join(explicit_activities)
+                return {
+                    "success": True,
+                    "recommendations": formatted_events,
+                    "total_found": len(relevant_events),
+                    "message": f"Found {len(formatted_events)} {requested_activities_str} events in {filter_city}"
+                }
+            
+            # Score and format events (for non-explicit requests)
             scored_events = []
             for event in relevant_events:
                 score = self._calculate_match_score_enhanced(event, user_preferences, filter_city)
@@ -2694,7 +2838,6 @@ Current user message: {user_message}"""
                 "recommendations": top_recommendations,
                 "total_found": len(scored_events),
                 "message": f"Found {len(top_recommendations)} events in {filter_city}" if filter_city else f"Found {len(top_recommendations)} recommended events"
-                # No bot_response for successful events - use structured data only
             }
             
         except Exception as e:
@@ -2826,7 +2969,10 @@ Current user message: {user_message}"""
         
         # Extract activity from query for personalized message
         activity = ""
-        for activity_word in ['quiz', 'drama', 'sports', 'music', 'tech', 'dance', 'comedy', 'art']:
+        for activity_word in ['football', 'soccer', 'cricket', 'badminton', 'tennis', 'basketball', 
+                             'volleyball', 'swimming', 'gym', 'yoga', 'quiz', 'drama', 'sports', 
+                             'music', 'tech', 'dance', 'comedy', 'art', 'hiking', 'cycling', 
+                             'running', 'fitness', 'pickleball', 'theater', 'improv']:
             if activity_word in query.lower():
                 activity = activity_word
                 break
@@ -2853,6 +2999,36 @@ Current user message: {user_message}"""
             ]
             
             return random.choice(responses)
+
+    def _generate_no_events_guidance_message_for_activity(self, city: str, activity: str, user_id: str = None):
+        """Generate helpful message when specific activity has no events"""
+        import random
+        
+        # Check if user has saved preferences
+        has_preferences = False
+        if user_id:
+            try:
+                user_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
+                has_preferences = bool(user_prefs)
+            except:
+                pass
+        
+        if not has_preferences:
+            # User has no preferences - ask for them
+            messages = [
+                f"I couldn't find any {activity} events in {city.title()} right now. Could you tell me more about your preferred activities and areas? This will help me find better matches for you!",
+                f"No {activity} events available in {city.title()} today. What other activities do you enjoy? Also, which areas of {city.title()} work best for you?",
+                f"Looks like {activity} isn't happening in {city.title()} at the moment. Let me know your other interests and preferred locations so I can suggest great alternatives!"
+            ]
+        else:
+            # User has preferences - suggest alternatives
+            messages = [
+                f"No {activity} events in {city.title()} right now, but I have other great options based on your interests! Would you like to see what's available?",
+                f"I couldn't find {activity} in {city.title()} today. How about checking out events in nearby cities, or trying a different activity?",
+                f"{activity.title()} isn't available in {city.title()} at the moment. Would you like me to show you events from your saved preferences instead?"
+            ]
+        
+        return random.choice(messages)
     
     def _generate_no_preferences_message(self, city: str) -> list:
         """Message when user has no saved preferences"""
@@ -3108,7 +3284,7 @@ Current user message: {user_message}"""
                 # treat as no results found
                 if not validated_events:
                     result["success"] = False
-                    result["message"] = result.get("bot_response", "No events found")
+                    result["message"] = result.get("message", "No events found")
                 else:
                     result["success"] = True
                 
