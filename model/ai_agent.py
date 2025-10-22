@@ -1462,6 +1462,7 @@ class MeetupBot:
     def __init__(self):
         self.events_data = None
         self.user_conversations = {}  # Store conversation history per user_id
+        self.user_conversation_context = {}  # Track emotional state, preferences evolution
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
@@ -1499,10 +1500,84 @@ class MeetupBot:
         if user_id not in self.user_conversations:
             self.user_conversations[user_id] = []
         self.user_conversations[user_id].append({"role": role, "content": content})
-        
+
         # Keep only last 10 messages per user to avoid memory bloat
         if len(self.user_conversations[user_id]) > 10:
             self.user_conversations[user_id] = self.user_conversations[user_id][-10:]
+
+    def _detect_emotional_cues(self, message: str) -> dict:
+        """Detect emotional state and concerns from user message for better empathy"""
+        cues = {'tone': 'neutral', 'concerns': []}
+
+        if not message:
+            return cues
+
+        message_lower = message.lower()
+
+        # Excitement indicators
+        if re.search(r'\b(excited|love|awesome|great|amazing|can\'?t wait|looking forward)\b', message_lower):
+            cues['tone'] = 'excited'
+
+        # Uncertainty indicators
+        elif re.search(r'\b(not sure|maybe|dunno|don\'?t know|confused|uncertain|hesitant)\b', message_lower):
+            cues['tone'] = 'uncertain'
+            cues['concerns'].append('needs_guidance')
+
+        # Boredom/dissatisfaction
+        elif re.search(r'\b(bored|boring|nothing|same old|tired of)\b', message_lower):
+            cues['tone'] = 'bored'
+            cues['concerns'].append('seeking_novelty')
+
+        # Social anxiety indicators
+        if re.search(r'\b(alone|solo|by myself|shy|introvert|nervous|awkward|anxious)\b', message_lower):
+            cues['concerns'].append('social_anxiety')
+
+        # New to area
+        if re.search(r'\b(new to|just moved|don\'?t know (the )?area|recently moved)\b', message_lower):
+            cues['concerns'].append('new_to_area')
+
+        # Budget conscious
+        if re.search(r'\b(cheap|free|budget|expensive|afford|cost)\b', message_lower):
+            cues['concerns'].append('budget_conscious')
+
+        # Time constraints
+        if re.search(r'\b(busy|tight schedule|limited time|quick)\b', message_lower):
+            cues['concerns'].append('time_constrained')
+
+        # Beginner/novice
+        if re.search(r'\b(beginner|new to|never (done|tried)|first time|novice|learning)\b', message_lower):
+            cues['concerns'].append('beginner_friendly_needed')
+
+        return cues
+
+    def _update_conversation_context(self, user_id: str, context_update: dict):
+        """Track user's emotional state and preference evolution across conversation"""
+        if not user_id:
+            return
+
+        if user_id not in self.user_conversation_context:
+            self.user_conversation_context[user_id] = {
+                'emotional_tone': 'neutral',
+                'exploration_stage': 'initial',  # initial, exploring, deciding, committed
+                'mentioned_concerns': [],
+                'interests_evolution': [],
+                'events_discussed': []
+            }
+
+        # Update with new context
+        for key, value in context_update.items():
+            if key == 'mentioned_concerns':
+                # Append new concerns without duplicating
+                existing = self.user_conversation_context[user_id].get('mentioned_concerns', [])
+                self.user_conversation_context[user_id]['mentioned_concerns'] = list(set(existing + value))
+            elif key == 'interests_evolution':
+                # Track how interests evolve
+                self.user_conversation_context[user_id]['interests_evolution'].append(value)
+            elif key == 'events_discussed':
+                # Track which events were discussed
+                self.user_conversation_context[user_id]['events_discussed'].extend(value)
+            else:
+                self.user_conversation_context[user_id][key] = value
 
     def extract_events_from_response(self, response_text: str, fallback_events: list = None) -> list:
         """Extract structured event data from AI response text or use fallback"""
@@ -1570,6 +1645,64 @@ class MeetupBot:
             print(f"❌ Location search error: {e}")
             return []
 
+    def suggest_similar_events(self, reference_event: dict, n_results: int = 3, user_city: str = None):
+        """Find similar events based on an event the user showed interest in"""
+        try:
+            if not reference_event:
+                return []
+
+            # Build search query from the reference event's characteristics
+            activity = reference_event.get('activity', '')
+            description = reference_event.get('description', '')
+            city = user_city or reference_event.get('city_name', '')
+
+            # Create a rich search query combining activity, description snippet, and location
+            search_query = f"{activity} {description[:100]} {city}"
+
+            # Search for similar events
+            similar_events = self.chroma_manager.search_events(search_query, n_results=n_results + 5)
+
+            # Filter out the original event and limit results
+            reference_id = reference_event.get('event_id')
+            filtered_events = [
+                e for e in similar_events
+                if e.get('event_id') != reference_id and e.get('available_spots', 0) > 0
+            ]
+
+            return filtered_events[:n_results]
+
+        except Exception as e:
+            print(f"❌ Similar events search error: {e}")
+            return []
+
+    def find_alternative_when_full(self, full_event: dict, n_results: int = 3):
+        """When an event is full, suggest alternatives with available spots"""
+        try:
+            if not full_event:
+                return []
+
+            # Search for events with same activity in same area/city
+            activity = full_event.get('activity', '')
+            area = full_event.get('area_name', '')
+            city = full_event.get('city_name', '')
+
+            search_query = f"{activity} {area} {city}"
+            alternatives = self.chroma_manager.search_events(search_query, n_results=n_results + 5)
+
+            # Filter: only events with available spots, exclude the full event
+            full_event_id = full_event.get('event_id')
+            available_alternatives = [
+                e for e in alternatives
+                if e.get('event_id') != full_event_id
+                and e.get('available_spots', 0) > 0
+            ]
+
+            return available_alternatives[:n_results]
+
+        except Exception as e:
+            print(f"❌ Alternative events search error: {e}")
+            return []
+
     def format_events_response(self, events: list) -> str:
         """Format events list into a readable response"""
         if not events:
@@ -1614,6 +1747,12 @@ class MeetupBot:
 
     def prepare_context(self, user_message, user_id: str = None):
         """Prepare context with dataset information for the AI model"""
+        # Detect emotional cues for empathetic responses
+        emotional_cues = self._detect_emotional_cues(user_message)
+
+        # Get conversation context
+        conversation_context = self.user_conversation_context.get(user_id, {}) if user_id else {}
+
         # Optional: detect a user_id in the message to personalize recommendations
         user_pref_context = ""
         prefs_missing = False
@@ -1832,11 +1971,23 @@ class MeetupBot:
         for msg in user_history[-6:]:  # Use user-specific history
             history_context += f"{msg['role']}: {msg['content']}\n"
 
+        # Add emotional context for empathetic responses
+        emotional_context = "\n🎭 User Emotional Context:\n"
+        emotional_context += f"- Emotional Tone: {emotional_cues.get('tone', 'neutral')}\n"
+        if emotional_cues.get('concerns'):
+            emotional_context += f"- User Concerns Detected: {', '.join(emotional_cues.get('concerns', []))}\n"
+            emotional_context += "  📝 Adjust your response to address these concerns empathetically!\n"
+        if conversation_context.get('exploration_stage'):
+            emotional_context += f"- Conversation Stage: {conversation_context.get('exploration_stage', 'initial')}\n"
+        if conversation_context.get('mentioned_concerns'):
+            emotional_context += f"- Previous Concerns: {', '.join(conversation_context.get('mentioned_concerns', []))}\n"
+
         system_prompt = f"""You are a warm, enthusiastic, and friendly meetup recommendation assistant named Miffy. You love helping people discover exciting events and make new connections. You have access to a vector database of events and provide personalized recommendations with genuine enthusiasm.
 
 {events_context}
 {history_context}
 {user_pref_context}
+{emotional_context}
 
 Instructions:
 
@@ -1874,6 +2025,61 @@ PERSONALITY & TONE:
 - Add personality with phrases like "Oh, this looks perfect for you!" or "You're going to love this one!"
 - Keep it friendly but not overly casual
 
+📱 MOBILE-FIRST COMMUNICATION:
+- **CRITICAL: Keep responses SHORT and SCANNABLE for mobile screens**
+- MAX 3-4 sentences before showing events
+- Use emojis sparingly (1-2 per message max)
+- Break up text with line breaks for readability
+- Event descriptions: 1-2 lines each, NOT full paragraphs
+- Think Twitter-length, not essay-length
+- Examples:
+  ✅ GOOD: "Found 3 cricket events for you! 🏏\n\nWhich day works best?"
+  ❌ BAD: Long paragraphs explaining everything in detail
+- **Bottom line first**: Show events quickly, ask questions after
+
+💝 EMOTIONAL INTELLIGENCE & EMPATHY:
+- **Active Listening**: Acknowledge what users share ("I hear you love cricket!" / "Sounds like you're looking for something new!")
+- **Empathy**: Recognize hesitation or concerns ("Not sure? No worries, let's explore together!" / "I understand - trying new things can feel daunting!")
+- **Curiosity**: Ask thoughtful follow-up questions ("What draws you to tech events?" / "Have you tried this activity before?")
+- **Encouragement**: Build confidence ("This is perfect for beginners - you'll fit right in!" / "Many people attend solo and make amazing friends!")
+- **Read Between Lines**: Pick up on emotional cues in user messages
+  - "I'm new to the city" → Emphasize welcoming clubs and community-building events
+  - "I'm bored" → Suggest exciting, unique experiences
+  - "Nothing interests me" → Ask discovery questions, suggest variety
+  - "I'm shy/introverted" → Highlight small group events, structured activities
+  - "I went before and..." → Remember context, build on their experience
+
+🗣️ CONVERSATIONAL FLOW - MULTI-TURN ENGAGEMENT:
+- **Don't just dump recommendations - have a conversation**
+- Show 2-3 events MAX (mobile screens = limited space!)
+- After showing events, ALWAYS ask ONE short follow-up question
+- Keep follow-ups BRIEF (one line max):
+  - "Which sounds good?"
+  - "Weekend or weekday?"
+  - "Solo or with friends?"
+  - "Want more options?"
+- **Help users explore efficiently:**
+  - Offer quick choices: "Weekend events?"
+  - Suggest alternatives concisely: "Cricket's full - try box cricket?"
+  - Build on interests briefly: "Love music? Check these 2!"
+  - NO long explanations - keep it snappy
+
+🔄 HANDLING DIFFERENT SCENARIOS (Keep ALL responses mobile-friendly):
+- **User is uncertain**: "Let's find something together! What vibe - active or chill?"
+- **No exact match**: "Try these similar ones!" + 2 events max
+- **Event is full**: "That's full, but check these 2!" + alternatives
+- **User trying new things**: "Love yoga? Try this mindfulness event!"
+- **First-time user**: "Welcome! What activities excite you?"
+- **Returning user**: "Hey again! What are you feeling today?"
+
+📏 RESPONSE LENGTH LIMITS (CRITICAL FOR MOBILE):
+- **Greeting**: 1-2 sentences max
+- **Event intro**: 1 sentence ("Here are 3 cricket events for you!")
+- **Per event**: 2-3 lines only (name, time, location, price)
+- **Follow-up question**: 1 short sentence
+- **Total message length**: Aim for what fits in 2 phone screens or less
+- **When user asks for details**: THEN you can expand, but still keep it scannable
+
 🎯 CRITICAL PREFERENCE HANDLING WORKFLOW:
 
 **LOCATION PRIORITY RULE:**
@@ -1887,28 +2093,31 @@ When a user requests event recommendations with their user_id:
 
 A. **USER_ID PROVIDED + SAVED PREFERENCES FOUND:**
    - ✅ IMMEDIATELY use their saved preferences to find the BEST matching events
-   - Greet warmly: "Hey [Name]! Based on your saved preferences for [activity] in [location], here are some perfect events for you!"
-   - Show 3-7 highly relevant events that match their stored interests
+   - Greet briefly: "Hey [Name]! Found some [activity] events for you 🎯"
+   - Show 2-3 highly relevant events (mobile screen = limited space!)
+   - Keep event details SHORT: name, time, venue, price only
+   - After events, ask ONE short follow-up: "Which sounds good?"
    - NO NEED to ask for preferences - they're already saved and loaded
 
 B. **USER_ID PROVIDED + NO SAVED PREFERENCES:**
    - ⚠️ MUST ask for preferences FIRST before showing any events
-   - Friendly approach: "Hi! I'd love to find the perfect events for you! Since this is our first time, let me learn about your interests:
-     • What activities get you excited? (sports, arts, tech, etc.)
-     • Which area/city works best for you?
-     • Any budget range I should keep in mind?
-     • Do you prefer weekends or weekday evenings?"
+   - Keep it SHORT and friendly:
+     "Hi! Quick question to find perfect events for you:
+     • What activities? (sports/arts/tech/etc)
+     • Which city/area?
+     • Budget range?
+     • Weekends or weekdays?"
    - WAIT for their response - DO NOT show random events
-   - Once they provide preferences, SAVE them and then recommend matching events
+   - Once they provide preferences, SAVE them and recommend 2-3 events
 
 C. **PREFERENCES PROVIDED IN CURRENT MESSAGE (with or without user_id):**
-   - Enthusiastically acknowledge: "Great! A [activity] lover in [location]! Let me find amazing [activity] events for you!"
+   - Acknowledge briefly: "Got it! Finding [activity] events in [location]..."
    - Use those preferences IMMEDIATELY to search for relevant events
    - Smart handling - DON'T ask for info they already gave:
      ❌ If they said "badminton" - don't ask about activities
-     ❌ If they said "Mumbai" - don't ask about location  
+     ❌ If they said "Mumbai" - don't ask about location
      ❌ If they mentioned budget - don't ask about price
-   - Only ask for missing details that would improve recommendations
+   - Only ask ONE missing detail if critical: "Weekends or weekdays work better?"
 
 D. **NO USER_ID + NO PREFERENCES:**
    - Ask for preferences first in a warm, conversational way
@@ -1921,24 +2130,31 @@ D. **NO USER_ID + NO PREFERENCES:**
    - Look up their saved preferences immediately
    - If found → Use them to get the BEST matching events
    - If not found → Ask for preferences BEFORE showing any events
-3. **If preferences found or provided:** Search with enthusiasm: "Let me find some amazing [activity] events for you in [location]!"
-4. **Return 3-7 highly relevant events** that match their specific interests, not generic events
-5. **NEVER show random/generic events** - always preference-matched events or ask for preferences first
+3. **If preferences found or provided:** Brief search message: "Finding [activity] events..."
+4. **Return 2-3 highly relevant events** (mobile screen = show less, not more!)
+5. **ALWAYS add ONE short follow-up question** (1 sentence max)
+6. **NEVER show random/generic events** - always preference-matched or ask preferences first
 
-**EVENT PRESENTATION REQUIREMENTS:**
-6. For each recommended event, present with excitement and ALWAYS include:
-   - Name and organizing club ("This looks perfect!" / "You'll love this one!")
-   - Activity type with enthusiasm
-   - Date and time (local) in IST
-   - **LOCATION DETAILS (MANDATORY):** Include full venue name, area, and city - users need to know exactly where to go!
-   - Price and available spots
-   - Why this matches their interests (1-2 lines)
-   - **CRITICAL: Registration URL (exact from database) - MUST BE INCLUDED FOR EVERY EVENT**
-6. If no exact matches: "I found some similar amazing options you might enjoy!"
-7. Use varied expressions: "Check this out!" / "How about this?" / "This could be great!"
-8. Add helpful tips: "Book soon, spots filling up!" / "Perfect for beginners!" 
-9. Close with engagement: "Which one catches your eye?" / "Want to see more options?"
-10. Always retrieve event data from vector database only
+**EVENT PRESENTATION REQUIREMENTS (MOBILE-OPTIMIZED):**
+7. For each event, keep it CONCISE (2-3 lines per event):
+   - Line 1: Event name + emoji
+   - Line 2: Date/time + Location (area only, not full address)
+   - Line 3: Price + Registration link
+   - **NO long descriptions** - user can tap for details
+   - Example format:
+     "🏏 Cricket Match - Beginner Friendly
+     Sat 2PM • Bandra West
+     ₹400 • [Register](url)"
+
+8. If no exact matches: "Try these similar ones!" + 2 events max
+9. Use SHORT encouraging phrases: "Perfect for you!" / "Great spot!" / "Book fast!"
+10. **MANDATORY: End with SHORT follow-up** (pick ONE):
+   - "Which one?"
+   - "Want more options?"
+   - "Weekend or weekday?"
+   - "Solo or with friends?"
+11. Always retrieve event data from vector database only
+12. **CRITICAL: Total response = 2 phone screens max (scroll test!)**
 
 **MANDATORY URL REQUIREMENT:**
 - EVERY single event recommendation MUST include the registration URL
@@ -2107,9 +2323,90 @@ Current user message: {user_message}"""
         ]
         
         full_greeting += random.choice(cta_options)
-        
+
         return full_greeting
-    
+
+    def generate_follow_up_question(self, events_shown: list, user_context: dict, emotional_cues: dict) -> str:
+        """Generate SHORT contextual follow-up questions for mobile screens"""
+        import random
+
+        if not events_shown:
+            # No events shown - help user explore (keep it SHORT)
+            if emotional_cues.get('tone') == 'uncertain':
+                return random.choice([
+                    "What vibe - energetic or chill?",
+                    "Outdoor or indoor activities?",
+                    "What sounds fun to you?"
+                ])
+            elif emotional_cues.get('tone') == 'bored':
+                return random.choice([
+                    "What's something new you'd try?",
+                    "Tell me one interest!",
+                    "Active or relaxed activities?"
+                ])
+            else:
+                return random.choice([
+                    "What activities excite you?",
+                    "Weekend or weekday?",
+                    "What are you into?"
+                ])
+
+        # Events were shown - SHORT mobile-friendly follow-ups
+        num_events = len(events_shown)
+        activities = list(set([e.get('activity', '') for e in events_shown if e.get('activity')]))
+
+        # Handle concerns (keep it SHORT)
+        concerns = emotional_cues.get('concerns', [])
+
+        if 'social_anxiety' in concerns:
+            return random.choice([
+                "Which feels comfortable? (Many go solo!)",
+                "Any look welcoming?",
+                "Want beginner-friendly ones?"
+            ])
+
+        if 'budget_conscious' in concerns:
+            return random.choice([
+                "Fit your budget?",
+                "Want cheaper options?",
+                "Need free events?"
+            ])
+
+        if 'beginner_friendly_needed' in concerns:
+            return random.choice([
+                "Which for beginners?",
+                "All good for first-timers!",
+                "Want the easiest one?"
+            ])
+
+        # General follow-ups (BRIEF)
+        exploration_stage = user_context.get('exploration_stage', 'initial')
+
+        if exploration_stage == 'deciding' or num_events <= 3:
+            # User narrowing down
+            return random.choice([
+                "Which one?",
+                "Like any of these?",
+                "Want more details?",
+                "Show different ones?"
+            ])
+        else:
+            # User exploring
+            if len(activities) > 1:
+                return random.choice([
+                    f"{activities[0]} or {activities[1]}?",
+                    "Narrow by day?",
+                    "Weekend or weekday?",
+                    "Which type?"
+                ])
+            else:
+                return random.choice([
+                    "Weekend only?",
+                    "Narrow by area?",
+                    "Solo or with friends?",
+                    "Want more?"
+                ])
+
     def get_bot_response(self, user_message, user_id: str = None):
         """Get response from the AI model with streaming"""
         try:
@@ -3305,9 +3602,27 @@ Current user message: {user_message}"""
     def get_bot_response_json(self, user_message: str, user_id: str = None) -> str:
         """Get bot response in JSON-friendly format with user-specific context"""
         try:
+            # Detect emotional cues and update conversation context
+            emotional_cues = self._detect_emotional_cues(user_message)
+            if user_id:
+                # Determine exploration stage based on conversation history
+                user_history = self._get_user_conversation_history(user_id)
+                exploration_stage = 'initial'
+                if len(user_history) > 0:
+                    exploration_stage = 'exploring'
+                if len(user_history) > 4:
+                    exploration_stage = 'deciding'
+
+                # Update conversation context with emotional intelligence
+                self._update_conversation_context(user_id, {
+                    'emotional_tone': emotional_cues.get('tone', 'neutral'),
+                    'exploration_stage': exploration_stage,
+                    'mentioned_concerns': emotional_cues.get('concerns', [])
+                })
+
             # Add message to user's conversation history
             self._add_to_user_conversation(user_id, "user", user_message)
-            
+
             # Get user-specific context for the AI
             user_history = self._get_user_conversation_history(user_id)
             
