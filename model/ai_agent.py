@@ -56,7 +56,9 @@ class EventDetailsForAgent:
     def __init__(self, event_id=None, event_name="", description="", activity="",
                  start_time=None, end_time=None, allowed_friends=0, ticket_price=0,
                  event_url="", available_spots=0, location_name="", location_url="",
-                 area_name="", city_name="", club_name="", payment_terms=""):
+                 area_name="", city_name="", club_name="", payment_terms="",
+                 activity_icon_url="", club_icon_url="", event_cover_image_url="",
+                 event_uuid="", participants_count=0):
         self.event_id = event_id
         self.event_name = event_name
         self.description = self._parse_description(description)  # Handle rich text description
@@ -73,6 +75,12 @@ class EventDetailsForAgent:
         self.city_name = city_name
         self.club_name = club_name
         self.payment_terms = payment_terms
+        # New fields from API
+        self.activity_icon_url = activity_icon_url
+        self.club_icon_url = club_icon_url
+        self.event_cover_image_url = event_cover_image_url
+        self.event_uuid = event_uuid
+        self.participants_count = participants_count
 
     def _parse_description(self, description):
         """Parse rich text description from JSON to plain text"""
@@ -134,7 +142,13 @@ class EventDetailsForAgent:
             'area_name': self.area_name,
             'city_name': self.city_name,
             'club_name': self.club_name,
-            'payment_terms': self.payment_terms
+            'payment_terms': self.payment_terms,
+            # New fields from API
+            'activity_icon_url': self.activity_icon_url,
+            'club_icon_url': self.club_icon_url,
+            'event_cover_image_url': self.event_cover_image_url,
+            'event_uuid': self.event_uuid,
+            'participants_count': self.participants_count
         }
 
 class ChromaDBManager:
@@ -243,9 +257,12 @@ class ChromaDBManager:
             ('City', event_data.get('city_name')),
             ('Price', f"₹{event_data.get('ticket_price')}" if event_data.get('ticket_price') is not None else None),
             ('Spots', event_data.get('available_spots')),
+            ('Participants', event_data.get('participants_count')),
             ('Payment', event_data.get('payment_terms')),
             ('Event Link', event_data.get('event_url')),  # Primary event access URL
-            ('Location Link', event_data.get('location_url'))
+            ('Location Link', event_data.get('location_url')),
+            ('Cover Image', event_data.get('event_cover_image_url')),
+            ('Event UUID', event_data.get('event_uuid'))
         ]
 
         text_parts = []
@@ -298,18 +315,36 @@ class ChromaDBManager:
       try:
          if clear_existing:
                try:
-                  existing_items = self.collection.get()
-                  ids_to_delete = existing_items.get("ids", [])
-                  
+                  # Get count before deletion
+                  initial_items = self.collection.get()
+                  ids_to_delete = initial_items.get("ids", [])
+                  initial_count = len(ids_to_delete)
+
+                  print(f"📊 ChromaDB before deletion: {initial_count} events")
+
                   if ids_to_delete:
                      batch_size = 100
                      for i in range(0, len(ids_to_delete), batch_size):
                            batch_ids = ids_to_delete[i:i + batch_size]
                            self.collection.delete(ids=batch_ids)
                      print(f"🗑️ Deleted {len(ids_to_delete)} old events")
+
+                     # Wait for ChromaDB to process deletions
+                     print("⏳ Waiting for ChromaDB to process deletions...")
+                     time.sleep(2)
+
+                     # Verify collection is empty after deletion
+                     after_delete = self.collection.get()
+                     remaining_count = len(after_delete.get("ids", []))
+
+                     if remaining_count == 0:
+                        print(f"✅ Deletion verified: Collection is now empty")
+                     else:
+                        print(f"⚠️ Warning: Expected 0 events after deletion, found {remaining_count}")
+                        print(f"⚠️ Deletion may be incomplete - this could cause data skip issues")
                   else:
                      print("ℹ️ No existing items to delete")
-                     
+
                except Exception as e:
                   print(f"❌ Error clearing collection: {e}")
                   return False
@@ -355,7 +390,13 @@ class ChromaDBManager:
                   'area_name': str(event.get('area_name', '')),
                   'city_name': str(event.get('city_name', '')),
                   'club_name': str(event.get('club_name', '')),
-                  'payment_terms': str(event.get('payment_terms', ''))
+                  'payment_terms': str(event.get('payment_terms', '')),
+                  # New fields from API
+                  'activity_icon_url': str(event.get('activity_icon_url', '')),
+                  'club_icon_url': str(event.get('club_icon_url', '')),
+                  'event_cover_image_url': str(event.get('event_cover_image_url', '')),
+                  'event_uuid': str(event.get('event_uuid', '')),
+                  'participants_count': str(event.get('participants_count', 0))
                }
 
                doc_text = self.prepare_event_text(metadata)
@@ -366,21 +407,105 @@ class ChromaDBManager:
 
          # Add in batches with error handling
          batch_size = 100
+         total_batches = (len(documents) + batch_size - 1) // batch_size
+
+         # Track counts for logging and failure detection
+         existing_ids = set()
+         failed_batches = 0
+
+         if not clear_existing:
+            # Get existing IDs to differentiate new vs updated
+            try:
+                existing_data = self.collection.get(ids=ids, include=[])
+                existing_ids = set(existing_data.get('ids', []))
+            except Exception as e:
+                print(f"⚠️ Could not fetch existing IDs: {e}")
+
          for i in range(0, len(documents), batch_size):
                try:
-                  print(f"📦 Adding events batch {i//batch_size + 1} with {len(documents[i:i+batch_size])} items")
-                  self.collection.add(
-                     documents=documents[i:i+batch_size],
-                     metadatas=metadatas[i:i+batch_size],
-                     ids=ids[i:i+batch_size]
-                  )
-                  print(f"✅ Added events batch {i//batch_size + 1}")
+                  batch_num = i//batch_size + 1
+                  batch_docs = documents[i:i+batch_size]
+                  batch_meta = metadatas[i:i+batch_size]
+                  batch_ids = ids[i:i+batch_size]
+
+                  if clear_existing:
+                      # After clearing, use add() for fresh data
+                      print(f"📦 Adding events batch {batch_num}/{total_batches} with {len(batch_docs)} items (fresh data)")
+                      self.collection.add(
+                         documents=batch_docs,
+                         metadatas=batch_meta,
+                         ids=batch_ids
+                      )
+                      print(f"✅ Added batch {batch_num}/{total_batches}")
+                  else:
+                      # For incremental sync, use upsert (updates existing + adds new)
+                      new_count = sum(1 for bid in batch_ids if bid not in existing_ids)
+                      update_count = len(batch_ids) - new_count
+                      print(f"📦 Upserting batch {batch_num}/{total_batches}: {new_count} new, {update_count} updates")
+
+                      self.collection.upsert(
+                         documents=batch_docs,
+                         metadatas=batch_meta,
+                         ids=batch_ids
+                      )
+                      print(f"✅ Upserted batch {batch_num}/{total_batches}")
+
                except Exception as e:
-                  print(f"❌ Failed to add batch {i//batch_size}: {str(e)}")
+                  print(f"❌ Failed to process batch {batch_num}/{total_batches}: {str(e)}")
+                  failed_batches += 1
                   # Try to continue with remaining batches
                   continue
 
-         print(f"✅ Added/updated {len(documents)} events to ChromaDB")
+         # Check if any batches failed
+         if failed_batches > 0:
+            print(f"⚠️ Warning: {failed_batches}/{total_batches} batches failed!")
+            return False
+
+         # Wait for ChromaDB to commit the data
+         print("⏳ Waiting for ChromaDB to commit data...")
+         time.sleep(1)
+
+         # Verify data was actually committed by checking total collection count
+         try:
+            after_add = self.collection.get()
+            actual_count = len(after_add.get("ids", []))
+
+            if clear_existing:
+               # For full sync, count should match exactly what we added
+               expected_count = len(documents)
+               print(f"📊 ChromaDB after addition: {actual_count} events")
+
+               if actual_count == expected_count:
+                  print(f"✅ Verification passed: {actual_count} events confirmed in ChromaDB")
+               elif actual_count == 0:
+                  print(f"❌ Verification FAILED: Expected {expected_count} events, but ChromaDB is EMPTY!")
+                  print(f"❌ Data from upcoming API was NOT successfully added")
+                  return False
+               else:
+                  print(f"⚠️ Verification warning: Expected {expected_count}, found {actual_count} events")
+            else:
+               # For incremental sync, count should increase by new events
+               initial_count = len(existing_ids)
+               expected_minimum = initial_count + sum(1 for eid in ids if eid not in existing_ids)
+               print(f"📊 ChromaDB after upsert: {actual_count} events (was {initial_count})")
+
+               if actual_count >= expected_minimum:
+                  added = actual_count - initial_count
+                  print(f"✅ Verification passed: Added {added} new events")
+               else:
+                  print(f"⚠️ Verification warning: Expected at least {expected_minimum}, found {actual_count}")
+
+         except Exception as e:
+            print(f"⚠️ Could not verify data commit: {e}")
+
+         # Final summary
+         if clear_existing:
+            print(f"✅ Successfully added {len(documents)} events to ChromaDB (full sync)")
+         else:
+            new_total = sum(1 for eid in ids if eid not in existing_ids)
+            update_total = len(ids) - new_total
+            print(f"✅ Successfully upserted {len(documents)} events: {new_total} new, {update_total} updated")
+
          return True
 
       except Exception as e:
@@ -639,6 +764,13 @@ class ChromaDBManager:
                 for i, metadata in enumerate(results['metadatas'][0]):
                     if metadata:
                         event = metadata.copy()
+                        # Add defaults for new fields if missing (backward compatibility)
+                        event.setdefault('activity_icon_url', '')
+                        event.setdefault('club_icon_url', '')
+                        event.setdefault('event_cover_image_url', '')
+                        event.setdefault('event_uuid', '')
+                        event.setdefault('participants_count', '0')
+
                         if results.get('distances'):
                             event['similarity_score'] = 1 - results['distances'][0][i]
                         events.append(event)
@@ -664,7 +796,16 @@ class ChromaDBManager:
                 where={"event_id": str(event_id)},
                 limit=1
             )
-            return results['metadatas'][0] if results['metadatas'] else None
+            if results['metadatas']:
+                event = results['metadatas'][0]
+                # Add defaults for new fields if missing (backward compatibility)
+                event.setdefault('activity_icon_url', '')
+                event.setdefault('club_icon_url', '')
+                event.setdefault('event_cover_image_url', '')
+                event.setdefault('event_uuid', '')
+                event.setdefault('participants_count', '0')
+                return event
+            return None
         except Exception as e:
             print(f"❌ Error getting event by ID: {e}")
             return None
@@ -933,7 +1074,13 @@ class EventSyncManager:
                         area_name=event_data.get('area_name', ''),
                         city_name=event_data.get('city_name', ''),
                         club_name=event_data.get('club_name', ''),
-                        payment_terms=event_data.get('payment_terms', '')
+                        payment_terms=event_data.get('payment_terms', ''),
+                        # New fields from API
+                        activity_icon_url=event_data.get('activity_icon_url', ''),
+                        club_icon_url=event_data.get('club_icon_url', ''),
+                        event_cover_image_url=event_data.get('event_cover_image_url', ''),
+                        event_uuid=event_data.get('event_uuid', ''),
+                        participants_count=event_data.get('participants_count', 0)
                     )
                     events.append(event)
 
@@ -1012,7 +1159,13 @@ class EventSyncManager:
                         area_name=event_data.get('area_name', ''),
                         city_name=event_data.get('city_name', ''),
                         club_name=event_data.get('club_name', ''),
-                        payment_terms=event_data.get('payment_terms', '')
+                        payment_terms=event_data.get('payment_terms', ''),
+                        # New fields from API
+                        activity_icon_url=event_data.get('activity_icon_url', ''),
+                        club_icon_url=event_data.get('club_icon_url', ''),
+                        event_cover_image_url=event_data.get('event_cover_image_url', ''),
+                        event_uuid=event_data.get('event_uuid', ''),
+                        participants_count=event_data.get('participants_count', 0)
                     )
                     events.append(event)
 
@@ -1026,13 +1179,16 @@ class EventSyncManager:
             print(f"❌ Error calling updated events API: {e}")
             return []
 
-    def run_single_sync(self, full_sync: bool = False):
+    def run_single_sync(self, full_sync: bool = False) -> int:
         """Run a single synchronization of events from API
-        
+
         Args:
             full_sync: If True, calls both /upcoming + /updated APIs (for initial load)
                       If False, only calls /updated API (for incremental updates)
-        
+
+        Returns:
+            Number of events attempted to sync (0 if failed)
+
         API Call Behavior:
             • full_sync=True  → /upcoming API + /updated API (complete refresh)
             • full_sync=False → /updated API only (incremental sync)
@@ -1050,16 +1206,24 @@ class EventSyncManager:
                 # Combine and deduplicate events
                 all_events = upcoming_dicts + updated_dicts
                 unique_events = {e['event_id']: e for e in all_events}.values()
-                
-                # For full sync, clear existing and add all
+
+                # For full sync, use upsert to preserve existing events
                 if unique_events:
-                    success = self.chroma_manager.add_events_batch(unique_events, clear_existing=True)
+                    event_count = len(unique_events)
+                    success = self.chroma_manager.add_events_batch(unique_events, clear_existing=False)
                     if success:
-                        print(f"✅ Successfully synchronized {len(unique_events)} events (full sync)")
+                        print(f"✅ Successfully synchronized {event_count} events (full sync)")
+                        # Wait for ChromaDB to fully commit all batches
+                        print("⏳ Waiting for ChromaDB to complete batch processing...")
+                        time.sleep(2)
+                        print("✅ ChromaDB sync confirmed")
+                        return event_count
                     else:
                         print("❌ Failed to add events to ChromaDB")
+                        return 0
                 else:
                     print("ℹ️ No events found in API responses")
+                    return 0
             else:
                 print("🔄 Running incremental event synchronization...")
                 # Only get updated events for incremental sync
@@ -1068,16 +1232,25 @@ class EventSyncManager:
 
                 # Add new/updated events without clearing existing
                 if updated_dicts:
+                    event_count = len(updated_dicts)
                     success = self.chroma_manager.add_events_batch(updated_dicts, clear_existing=False)
                     if success:
-                        print(f"✅ Successfully synchronized {len(updated_dicts)} updated events")
+                        print(f"✅ Successfully synchronized {event_count} updated events")
+                        # Wait for ChromaDB to fully commit all batches
+                        print("⏳ Waiting for ChromaDB to complete batch processing...")
+                        time.sleep(2)
+                        print("✅ ChromaDB sync confirmed")
+                        return event_count
                     else:
                         print("❌ Failed to add updated events to ChromaDB")
+                        return 0
                 else:
                     print("ℹ️ No updated events found")
+                    return 0
 
         except Exception as e:
             print(f"❌ Error during synchronization: {e}")
+            return 0
 
     def start_periodic_sync(self, interval_minutes: int = 2):
         """Start periodic synchronization of events"""
@@ -1459,12 +1632,42 @@ class UserPreferenceSyncManager:
    #          return 0
 
 class MeetupBot:
-    def __init__(self):
+    def __init__(self, auto_sync: bool = True):
         self.events_data = None
         self.user_conversations = {}  # Store conversation history per user_id
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
+
+        # Auto-sync on initialization (optional, enabled by default)
+        if auto_sync:
+            print("🔄 Auto-syncing latest upcoming events on init...")
+            print("📞 Calling /upcoming + /updated APIs (preserving existing events)")
+            try:
+                # Use full sync to get all current events, but preserve existing ones
+                synced_count = self.sync_events_once(full_sync=True)
+
+                if synced_count > 0:
+                    # Verify data was actually committed to ChromaDB
+                    print("⏳ Verifying data in ChromaDB...")
+                    time.sleep(1)
+
+                    collection_info = self.chroma_manager.get_collection_stats()
+                    actual_count = collection_info.get('total_events', 0)
+
+                    if actual_count >= synced_count:
+                        print(f"✅ Auto-sync verified! {actual_count} events confirmed in ChromaDB")
+                    elif actual_count > 0:
+                        print(f"⚠️ Partial sync: Expected {synced_count}, found {actual_count} events in ChromaDB")
+                    else:
+                        print(f"❌ Sync verification failed: Expected {synced_count} events, but ChromaDB is empty!")
+                        print("⚠️ Data from upcoming API was NOT successfully added")
+                else:
+                    print("⚠️ Auto-sync returned 0 events - check API connection or data availability")
+
+            except Exception as e:
+                print(f"⚠️ Auto-sync failed: {e}")
+                print("You can manually sync with: bot.sync_events_once(full_sync=True)")
 
     def _safe_float(self, value):
         """Safely convert value to float"""
@@ -2256,13 +2459,16 @@ Current user message: {user_message}"""
         """Stop periodic event synchronization"""
         self.event_sync_manager.stop_periodic_sync()
 
-    def sync_events_once(self, full_sync: bool = False):
+    def sync_events_once(self, full_sync: bool = False) -> int:
         """Run a single event synchronization cycle
-        
+
         Args:
             full_sync: If True, performs full sync (default: False for incremental)
+
+        Returns:
+            Number of events synced (0 if failed)
         """
-        self.event_sync_manager.run_single_sync(full_sync=full_sync)
+        return self.event_sync_manager.run_single_sync(full_sync=full_sync)
 
     def sync_user_preferences_once(self, clear_existing: bool = False):
         """Run a full user preferences synchronization cycle using cursor pagination"""
@@ -2809,7 +3015,13 @@ Current user message: {user_message}"""
                         },
                         "price": self._safe_float(event.get('ticket_price', 0)),
                         "available_spots": self._safe_int(event.get('available_spots', 0)),
-                        "registration_url": registration_url
+                        "registration_url": registration_url,
+                        # New fields from API
+                        "activity_icon_url": event.get('activity_icon_url', ''),
+                        "club_icon_url": event.get('club_icon_url', ''),
+                        "event_cover_image_url": event.get('event_cover_image_url', ''),
+                        "event_uuid": event.get('event_uuid', ''),
+                        "participants_count": self._safe_int(event.get('participants_count', 0))
                     }
                     formatted_events.append(event_data)
                 
@@ -2867,6 +3079,12 @@ Current user message: {user_message}"""
                         "price": self._safe_float(event.get('ticket_price', 0)),
                         "available_spots": self._safe_int(event.get('available_spots', 0)),
                         "registration_url": registration_url,
+                        # New fields from API
+                        "activity_icon_url": event.get('activity_icon_url', ''),
+                        "club_icon_url": event.get('club_icon_url', ''),
+                        "event_cover_image_url": event.get('event_cover_image_url', ''),
+                        "event_uuid": event.get('event_uuid', ''),
+                        "participants_count": self._safe_int(event.get('participants_count', 0)),
                         "_score": score  # Temporary for sorting
                     }
                     scored_events.append(event_data)
@@ -3377,7 +3595,13 @@ Current user message: {user_message}"""
                         "location": event.get('location', {}),
                         "price": self._safe_float(event.get('price', event.get('ticket_price', 0))),
                         "available_spots": self._safe_int(event.get('available_spots', 0)),
-                        "registration_url": str(event.get('registration_url', 'Contact organizer'))
+                        "registration_url": str(event.get('registration_url', 'Contact organizer')),
+                        # New fields from API
+                        "activity_icon_url": str(event.get('activity_icon_url', '')),
+                        "club_icon_url": str(event.get('club_icon_url', '')),
+                        "event_cover_image_url": str(event.get('event_cover_image_url', '')),
+                        "event_uuid": str(event.get('event_uuid', '')),
+                        "participants_count": self._safe_int(event.get('participants_count', 0))
                     }
                     
                     # Ensure location is properly structured
@@ -3413,14 +3637,15 @@ Current user message: {user_message}"""
             }
 
 if __name__ == "__main__":
-    # Create bot instance
+    # Create bot instance with auto-sync enabled (default)
+    # To disable auto-sync, use: bot = MeetupBot(auto_sync=False)
     bot = MeetupBot()
 
     # Instructions for use
-    print("🚀 Welcome to Miffy - Your Personal Meetup Recommendation Assistant!")
+    print("\n🚀 Welcome to Miffy - Your Personal Meetup Recommendation Assistant!")
     print("=" * 60)
     print("📋 Instructions:")
-    print("1. Miffy will automatically sync events from the API")
+    print("1. Miffy automatically synced events during initialization")
     print("2. Start chatting with Miffy about events you're interested in")
     print("3. Miffy will recommend events based on your preferences")
     print("4. Type 'quit' to exit the conversation")
@@ -3431,41 +3656,21 @@ if __name__ == "__main__":
     print("• Perfect for mobile apps and web integrations!")
     print("=" * 60)
 
-    # Step 1: Check if data already exists
-    print("\n📁 Step 1: Checking for existing data...")
-    print(f"🔧 Debug: ChromaDB server: {bot.chroma_manager.host}:{bot.chroma_manager.port}")
+    # Note: Auto-sync already happened during MeetupBot.__init__()
+    # Manual sync is still available: bot.sync_events_once(full_sync=True)
+    print(f"\n🔧 ChromaDB server: {bot.chroma_manager.host}:{bot.chroma_manager.port}")
+    time.sleep(1)
 
-    # Add error handling for collection info
+    # Check event count after sync
     try:
         collection_info = bot.chroma_manager.get_collection_stats()
-        print(f"🔧 Debug: Collection info: {collection_info}")
         existing_events = collection_info.get('total_events', 0)
-        print(f"🔧 Debug: Existing events count: {existing_events}")
+        if existing_events > 0:
+            print(f"✅ ChromaDB now has {existing_events} events!")
+        else:
+            print("❌ No events found after sync. Please check API connection.")
     except Exception as e:
-        print(f"🔧 Debug: Error getting collection info: {e}")
-        existing_events = 0
-
-    if existing_events > 0:
-        print(f"✅ Found {existing_events} events in ChromaDB! Using existing data.")
-        print("🔄 Running incremental sync to get latest updates...")
-        print("📞 This will call /updated API to get latest changes")
-        bot.sync_events_once(full_sync=False)  # Incremental sync to get updates
-    else:
-        print("❌ No existing events found. Running full initial sync...")
-        print("📞 This will call /upcoming API to load all current events")
-        bot.sync_events_once(full_sync=True)  # Full sync for first time
-        time.sleep(2)
-
-        # Check again after sync
-        try:
-            collection_info = bot.chroma_manager.get_collection_stats()
-            existing_events = collection_info.get('total_events', 0)
-            if existing_events > 0:
-                print(f"✅ Now have {existing_events} events in ChromaDB!")
-            else:
-                print("❌ Still no events found after sync. Please check API connection.")
-        except Exception as e:
-            print(f"❌ Error checking collection after sync: {e}")
+        print(f"❌ Error checking collection after sync: {e}")
 
     # Check user preferences collection as well
     print("\n📁 Step 1b: Checking user preferences data...")
@@ -3522,13 +3727,13 @@ if __name__ == "__main__":
         print("2. bot.start_with_sync(2) - Start with 2-minute incremental sync")
         print("3. bot.sync_events_once(full_sync=False) - Run incremental sync")
         print("4. bot.sync_events_once(full_sync=True) - Run full sync (clears existing)")
-        print("\nNow preserves existing event data and uses incremental updates!")
+        print("\nNow uses upsert to preserve existing data and add new events!")
         print("Periodic sync focuses on '/updated' API for efficient updates every 2 minutes.")
         print("\n📞 API Call Pattern:")
-        print("• Server START (no events) → /upcoming API (gets all current events)")
-        print("• Server START (has events) → /updated API (gets recent changes)")
-        print("• Every 2 minutes → /updated API (incremental sync)")
+        print("• Server START (always) → /upcoming + /updated APIs (ensures fresh upcoming events)")
+        print("• Every 2 minutes → /updated API only (incremental sync for changes)")
         print("• Manual full sync → /upcoming + /updated APIs (complete refresh)")
+        print("• All syncs use UPSERT → preserves old events, updates existing, adds new")
         
         print("\n📋 User Preferences CSV Import Methods:")
         print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")

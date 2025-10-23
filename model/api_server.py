@@ -89,6 +89,12 @@ class EventRecommendation(BaseModel):
     price: float
     available_spots: int
     registration_url: str
+    # New fields from API
+    activity_icon_url: Optional[str] = None
+    club_icon_url: Optional[str] = None
+    event_cover_image_url: Optional[str] = None
+    event_uuid: Optional[str] = None
+    participants_count: Optional[int] = 0
 
 
 class ChatRequest(BaseModel):
