@@ -423,48 +423,26 @@ class ChromaDBManager:
 
          for i in range(0, len(documents), batch_size):
                try:
-<<<<<<< Updated upstream
                   batch_num = i//batch_size + 1
                   batch_docs = documents[i:i+batch_size]
                   batch_meta = metadatas[i:i+batch_size]
                   batch_ids = ids[i:i+batch_size]
 
-                  if clear_existing:
-                      # After clearing, use add() for fresh data
-                      print(f"📦 Adding events batch {batch_num}/{total_batches} with {len(batch_docs)} items (fresh data)")
-                      self.collection.add(
-                         documents=batch_docs,
-                         metadatas=batch_meta,
-                         ids=batch_ids
-                      )
-                      print(f"✅ Added batch {batch_num}/{total_batches}")
-                  else:
-                      # For incremental sync, use upsert (updates existing + adds new)
-                      new_count = sum(1 for bid in batch_ids if bid not in existing_ids)
-                      update_count = len(batch_ids) - new_count
-                      print(f"📦 Upserting batch {batch_num}/{total_batches}: {new_count} new, {update_count} updates")
+                  # Always use upsert (updates existing + adds new) - safer than add()
+                  new_count = sum(1 for bid in batch_ids if bid not in existing_ids)
+                  update_count = len(batch_ids) - new_count
+                  print(f"📦 Upserting batch {batch_num}/{total_batches}: {new_count} new, {update_count} updates")
 
-                      self.collection.upsert(
-                         documents=batch_docs,
-                         metadatas=batch_meta,
-                         ids=batch_ids
-                      )
-                      print(f"✅ Upserted batch {batch_num}/{total_batches}")
-
-               except Exception as e:
-                  print(f"❌ Failed to process batch {batch_num}/{total_batches}: {str(e)}")
-                  failed_batches += 1
-=======
-                  print(f"📦 Upserting events batch {i//batch_size + 1} with {len(documents[i:i+batch_size])} items")
                   self.collection.upsert(
-                     documents=documents[i:i+batch_size],
-                     metadatas=metadatas[i:i+batch_size],
-                     ids=ids[i:i+batch_size]
+                     documents=batch_docs,
+                     metadatas=batch_meta,
+                     ids=batch_ids
                   )
-                  print(f"✅ Upserted events batch {i//batch_size + 1}")
+                  print(f"✅ Upserted batch {batch_num}/{total_batches}")
+
                except Exception as e:
-                  print(f"❌ Failed to upsert batch {i//batch_size}: {str(e)}")
->>>>>>> Stashed changes
+                  print(f"❌ Failed to upsert batch {batch_num}/{total_batches}: {str(e)}")
+                  failed_batches += 1
                   # Try to continue with remaining batches
                   continue
 
@@ -1219,14 +1197,9 @@ class EventSyncManager:
                 all_events = upcoming_dicts + updated_dicts
                 unique_events = {e['event_id']: e for e in all_events}.values()
 
-<<<<<<< Updated upstream
-                # For full sync, use upsert to preserve existing events
-                if unique_events:
-                    event_count = len(unique_events)
-=======
                 # For full sync, upsert all events (no clearing needed)
                 if unique_events:
->>>>>>> Stashed changes
+                    event_count = len(unique_events)
                     success = self.chroma_manager.add_events_batch(unique_events, clear_existing=False)
                     if success:
                         print(f"✅ Successfully synchronized {event_count} events (full sync)")
