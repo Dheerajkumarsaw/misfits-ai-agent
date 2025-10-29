@@ -1087,15 +1087,17 @@ class EventSyncManager:
     def call_updated_events_api(self) -> List[EventDetailsForAgent]:
         """Call the updated/new events REST API"""
         try:
+            from datetime import datetime
             print(f"🔄 Calling Updated events API: {self.updated_api_url}")
-            
+            print(f"⏰ Timestamp: {datetime.now().isoformat()}")
+
             # Prepare empty JSON payload
             payload = {}
             headers = {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
             }
-            
+
             # Note: Using POST instead of GET since GET with body is discouraged
             response = requests.post(
                 self.updated_api_url,
@@ -1104,23 +1106,15 @@ class EventSyncManager:
                 timeout=30
             )
 
+            print(f"📊 Response Status Code: {response.status_code}")
+
             if response.status_code == 200:
                 data = response.json()
                 events = []
 
                 # Handle both direct list and nested format
-                events_data = data.get('events', []) if isinstance(data, dict) else data
-                
-                # Debug: Check if we have any events with URLs
-                if events_data and len(events_data) > 0:
-                    first_event = events_data[0]
-                    url_fields = ['event_url', 'registration_url', 'signup_url', 'booking_url', 'link', 'url']
-                    found_urls = {field: first_event.get(field) for field in url_fields if first_event.get(field)}
-                    print(f"🔧 Debug: First updated event URL fields found: {found_urls}")
-                    if not found_urls:
-                        print(f"⚠️ Warning: No URL fields found in first updated event. Available fields: {list(first_event.keys())}")
-                else:
-                    print("⚠️ Warning: No events data received from updated API")
+                events_data = data.get('updated_and_new_events', []) if isinstance(data, dict) else data
+                print(f"📊 Found {len(events_data) if isinstance(events_data, list) else 0} events in response")
 
                 for event_data in events_data:
                     # Try multiple possible URL field names from the API
@@ -1163,8 +1157,15 @@ class EventSyncManager:
                 return events
             else:
                 print(f"❌ API call failed with status code: {response.status_code}")
+                print(f"❌ Response: {response.text[:200]}")  # Only first 200 chars
                 return []
 
+        except requests.exceptions.Timeout as e:
+            print(f"❌ Timeout error: {e}")
+            return []
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Network error: {e}")
+            return []
         except Exception as e:
             print(f"❌ Error calling updated events API: {e}")
             return []
