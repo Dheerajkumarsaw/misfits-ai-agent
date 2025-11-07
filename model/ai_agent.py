@@ -3725,7 +3725,7 @@ if __name__ == "__main__":
         print("• Every 2 minutes → /updated API only (incremental sync for changes)")
         print("• Manual full sync → /upcoming + /updated APIs (complete refresh)")
         print("• All syncs use UPSERT → preserves old events, updates existing, adds new")
-        
+         
         print("\n📋 User Preferences CSV Import Methods:")
         print("• bot.user_pref_sync_manager.import_user_preferences_from_csv_path('path/to/file.csv')")
         print("• bot.user_pref_sync_manager.prompt_and_import_csv_interactive()") 
