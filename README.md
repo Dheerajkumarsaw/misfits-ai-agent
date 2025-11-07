@@ -98,7 +98,19 @@ docker run -d -p 8000:8000 chromadb/chroma
 
 ### 3. Running the Production API Server
 
+#### **Mac/Linux**
+
 ```bash
+# Navigate to model directory
+cd model
+
+# Run the FastAPI server
+python3 api_server.py
+```
+
+#### **Windows**
+
+```cmd
 # Navigate to model directory
 cd model
 
@@ -426,7 +438,7 @@ export OPENAI_API_KEY=nvapi-your-key-here
 
 ```bash
 # Mac/Linux
-CHROMA_HOST=localhost CHROMA_PORT=8000 python api_server.py
+CHROMA_HOST=localhost CHROMA_PORT=8000 python3 api_server.py
 
 # Windows
 set CHROMA_HOST=localhost && set CHROMA_PORT=8000 && python api_server.py
@@ -491,7 +503,7 @@ pip install -r requirements.txt
 
 # Run API server
 cd model
-python api_server.py
+python3 api_server.py
 ```
 
 #### **Windows**
