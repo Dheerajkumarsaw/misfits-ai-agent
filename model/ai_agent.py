@@ -384,7 +384,7 @@ class ChromaDBManager:
                   'ticket_price': str(event.get('ticket_price', '')),
                   'event_url': str(event_url),
                   'registration_url': str(event_url),
-                  'available_spots': str(event.get('available_spots', '')),
+                  'available_spots': str(event.get('available_spots', 0)),
                   'location_name': str(event.get('location_name', '')),
                   'location_url': str(event.get('location_url', '')),
                   'area_name': str(event.get('area_name', '')),
@@ -760,6 +760,7 @@ class ChromaDBManager:
                         event.setdefault('event_cover_image_url', '')
                         event.setdefault('event_uuid', '')
                         event.setdefault('participants_count', '0')
+                        event.setdefault('available_spots', '0')
 
                         if results.get('distances'):
                             event['similarity_score'] = 1 - results['distances'][0][i]
@@ -794,6 +795,7 @@ class ChromaDBManager:
                 event.setdefault('event_cover_image_url', '')
                 event.setdefault('event_uuid', '')
                 event.setdefault('participants_count', '0')
+                event.setdefault('available_spots', '0')
                 return event
             return None
         except Exception as e:
@@ -900,6 +902,7 @@ class ChromaDBManager:
             f"📍 **Where**: {event.get('location_name', 'N/A')}",
             f"🗺️ **Area**: {event.get('area_name', 'N/A')}, {event.get('city_name', 'N/A')}",
             f"💰 **Price**: ₹{event.get('ticket_price', 'N/A')}",
+            f"👥 **Joined**: {event.get('participants_count', 0)}",
             f"🎟️ **Available Spots**: {event.get('available_spots', 'N/A')}",
             f"💳 **Payment Terms**: {event.get('payment_terms', 'N/A')}"
         ]
@@ -1779,6 +1782,7 @@ class MeetupBot:
             response += f"📍 **Where**: {event.get('location_name', 'N/A')}\n"
             response += f"🗺️ **Area**: {event.get('area_name', 'N/A')}, {event.get('city_name', 'N/A')}\n"
             response += f"💰 **Price**: ₹{event.get('ticket_price', 'N/A')}\n"
+            response += f"👥 **Joined**: {event.get('participants_count', 0)}\n"
             response += f"🎟️ **Available Spots**: {event.get('available_spots', 'N/A')}\n"
             response += f"💳 **Payment Terms**: {event.get('payment_terms', 'N/A')}\n"
 
@@ -2068,6 +2072,22 @@ PERSONALITY & TONE:
 - Add personality with phrases like "Oh, this looks perfect for you!" or "You're going to love this one!"
 - Keep it friendly but not overly casual
 
+CONVERSATION HANDLING:
+- Respond naturally to greetings (hi, hello, hey) without forcing event suggestions
+- Only suggest events when users explicitly ask or show clear interest
+- Keep casual responses brief and welcoming - invite them to explore events
+- Let users guide the conversation - don't be pushy about recommendations
+- For simple greetings, just be friendly and ask how you can help
+
+INTENT UNDERSTANDING (Be Smart!):
+- Analyze user's ACTUAL intent, not just keywords
+- "I don't want events" = NEGATIVE intent → Don't search, acknowledge politely
+- "Find cricket events" = POSITIVE intent → Search and recommend
+- "Restart conversation" = RESET intent → Clear context, start fresh
+- "What can you do?" = INFORMATIONAL → Explain your capabilities, don't search
+- "Show me activities" = SEARCH intent → Search for activities
+- Consider context: "I love events!" (casual talk) vs "Show me events" (search request)
+
 🎯 CRITICAL PREFERENCE HANDLING WORKFLOW:
 
 **LOCATION PRIORITY RULE:**
@@ -2201,11 +2221,17 @@ Current user message: {user_message}"""
         
         return preferences
     
-    def generate_personalized_greeting(self, user_id: str = None, user_name: str = None):
-        """Generate a personalized, friendly greeting that varies each time"""
+    def generate_personalized_greeting(self, user_id: str = None, user_name: str = None, include_event_teaser: bool = True):
+        """Generate a personalized, friendly greeting that varies each time
+
+        Args:
+            user_id: Optional user ID to personalize greeting
+            user_name: Optional user name to include in greeting
+            include_event_teaser: If True, includes event suggestions (default). If False, just friendly greeting.
+        """
         import random
         from datetime import datetime
-        
+
         # Get current time of day
         hour = datetime.now().hour
         if hour < 12:
@@ -2214,12 +2240,12 @@ Current user message: {user_message}"""
             time_greeting = "Good afternoon"
         else:
             time_greeting = "Good evening"
-        
+
         # Try to get user preferences if user_id provided
         user_prefs = None
         user_activities = []
         user_city = None
-        
+
         if user_id:
             try:
                 user_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
@@ -2235,7 +2261,7 @@ Current user message: {user_message}"""
                                 user_activities.append(activity)
             except:
                 pass
-        
+
         # Base greetings with variety - Miffy style
         if user_name:
             name_greetings = [
@@ -2257,7 +2283,19 @@ Current user message: {user_message}"""
                 "Greetings! Miffy at your service! 😊"
             ]
             greeting = random.choice(generic_greetings)
-        
+
+        # If not including event teaser, return simple greeting with CTA
+        if not include_event_teaser:
+            simple_cta_options = [
+                "\n\nHow can I help you today?",
+                "\n\nWhat can I help you discover?",
+                "\n\nWhat brings you here today?",
+                "\n\nHow may I assist you?",
+                "\n\nWhat would you like to know about?",
+                "\n\nLet me know if you're looking for any events or activities!"
+            ]
+            return f"{greeting}{random.choice(simple_cta_options)}"
+
         # Add personalized event teasers based on preferences
         if user_activities:
             activity = random.choice(user_activities)
@@ -2286,10 +2324,10 @@ Current user message: {user_message}"""
                 "Interesting opportunities are waiting for you!",
                 "New experiences are just a click away!"
             ]
-        
+
         # Combine greeting with teaser
         full_greeting = f"{greeting} {random.choice(event_teasers)}"
-        
+
         # Add call to action
         cta_options = [
             "\n\n🔍 What kind of adventure are you looking for today?",
@@ -2299,9 +2337,9 @@ Current user message: {user_message}"""
             "\n\n🚀 Ready to discover something new?",
             "\n\n💫 What's on your mind today?"
         ]
-        
+
         full_greeting += random.choice(cta_options)
-        
+
         return full_greeting
     
     def get_bot_response(self, user_message, user_id: str = None):
