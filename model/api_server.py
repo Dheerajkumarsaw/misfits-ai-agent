@@ -654,6 +654,110 @@ async def websocket_chat(websocket: WebSocket):
             user_id = payload.get("user_id")
             user_current_city = payload.get("user_current_city") or payload.get("city")
 
+            message_lower = query.lower().strip()
+
+            # Smart intent detection - understand what user really wants
+            def detect_user_intent(message: str) -> str:
+                """Detect user's actual intent from message
+                Returns: 'search_events', 'restart', 'greeting', 'question', 'negative'
+                """
+                msg = message.lower().strip()
+
+                # 1. Restart conversation intent
+                restart_keywords = ["restart", "reset", "start over", "new conversation", "clear chat", "begin again", "fresh start"]
+                if any(kw in msg for kw in restart_keywords):
+                    return 'restart'
+
+                # 2. Negative intent - user explicitly doesn't want events
+                negative_patterns = ["don't want", "not interested", "no thanks", "never mind", "don't show", "no event"]
+                if any(pattern in msg for pattern in negative_patterns):
+                    return 'negative'
+
+                # 3. Questions about bot capabilities
+                question_patterns = ["what can you", "who are you", "what do you do", "how do you work", "tell me about"]
+                if any(pattern in msg for pattern in question_patterns):
+                    return 'question'
+
+                # 4. Event search intent - positive action words + event context
+                search_patterns = ["find", "search", "show me", "looking for", "want to", "interested in",
+                                 "recommend", "suggest", "get me", "i need", "i want"]
+                event_words = ["event", "activity", "activities", "meetup", "game", "session", "class", "workshop"]
+
+                has_action = any(pattern in msg for pattern in search_patterns)
+                has_event_context = any(word in msg for word in event_words)
+
+                # Strong event intent if has action word OR event context with positive framing
+                if has_action or has_event_context:
+                    return 'search_events'
+
+                # 5. Default to greeting for casual conversation
+                return 'greeting'
+
+            # Detect the intent
+            user_intent = detect_user_intent(message_lower)
+
+            # Handle different intents
+            if user_intent == 'restart':
+                # Restart conversation - clear history and greet
+                greeting_response = bot.generate_personalized_greeting(
+                    user_id=user_id,
+                    include_event_teaser=False
+                )
+                await websocket.send_json({
+                    "type": "response",
+                    "success": True,
+                    "message": f"🔄 Conversation restarted!\n\n{greeting_response}",
+                    "recommendations": [],
+                    "total_found": 0
+                })
+                continue
+
+            elif user_intent == 'negative':
+                # User explicitly doesn't want events
+                await websocket.send_json({
+                    "type": "response",
+                    "success": True,
+                    "message": "No problem! I'm here whenever you need help discovering events. Just let me know! 😊",
+                    "recommendations": [],
+                    "total_found": 0
+                })
+                continue
+
+            elif user_intent == 'question':
+                # User asking about bot capabilities
+                capabilities_message = """I'm Miffy, your friendly event discovery companion! 🌟
+
+Here's what I can help you with:
+• 🔍 Find events and activities based on your interests
+• 🎯 Get personalized recommendations for meetups
+• 📍 Discover events in your city
+• 🎨 Explore various activities: sports, tech, music, arts, and more!
+
+Just tell me what you're looking for, and I'll find the perfect events for you!"""
+                await websocket.send_json({
+                    "type": "response",
+                    "success": True,
+                    "message": capabilities_message,
+                    "recommendations": [],
+                    "total_found": 0
+                })
+                continue
+
+            elif user_intent == 'greeting':
+                # Casual conversation without event intent
+                greeting_response = bot.generate_personalized_greeting(
+                    user_id=user_id,
+                    include_event_teaser=False
+                )
+                await websocket.send_json({
+                    "type": "response",
+                    "success": True,
+                    "message": greeting_response,
+                    "recommendations": [],
+                    "total_found": 0
+                })
+                continue
+
             # Build recommendation request-compatible payload
             request_data = {
                 "user_id": user_id,
