@@ -620,6 +620,33 @@ async def sync_events(full_sync: bool = False):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/sync/users")
+async def sync_users():
+    """Trigger user preference synchronization from API"""
+    try:
+        bot = get_bot()
+        synced_count = bot.sync_users_once()
+        return {
+            "success": True,
+            "message": f"User sync completed. Total synced: {synced_count}",
+            "synced_count": synced_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/sync/users/status")
+async def get_user_sync_status():
+    """Get user sync status"""
+    try:
+        bot = get_bot()
+        status = bot.get_user_sync_status()
+        return {
+            "success": True,
+            "status": status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Kubernetes health check endpoints
 @app.get("/health/liveness")
 async def liveness():

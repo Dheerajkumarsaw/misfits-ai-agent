@@ -1625,6 +1625,181 @@ class UserPreferenceSyncManager:
    #          print(f"❌ Error during interactive CSV import: {e}", flush=True)
    #          return 0
 
+class UserPreferenceAPISyncManager:
+    """API-based user preference sync manager with scheduled daily sync at 12 AM IST"""
+
+    def __init__(self, chroma_manager: ChromaDBManager):
+        self.chroma_manager = chroma_manager
+        self.user_api_url = "https://notify.misfits.net.in/api/user/ai-agent/all"
+        self.batch_size = 2000
+        self.is_running = False
+        self.sync_thread = None
+        self.last_sync_time = None
+        self.last_sync_count = 0
+
+    def fetch_user_preferences_page(self, offset: int = 0, limit: int = 2000) -> tuple:
+        """Fetch a page of user preferences from API with ID-based pagination (offset).
+
+        Returns:
+            tuple: (list of user dicts, next_offset or None)
+        """
+        try:
+            params = {
+                'offset': offset,
+                'page_limit': limit
+            }
+
+            print(f"📥 Fetching users from API (offset={offset}, page_limit={limit})...", flush=True)
+            response = requests.get(self.user_api_url, params=params, timeout=30)
+
+            if response.status_code == 404:
+                print("⚠️ User API endpoint not found. User sync will be skipped.", flush=True)
+                return [], None
+
+            response.raise_for_status()
+            data = response.json()
+
+            users = data.get('users', [])
+
+            # Extract highest user_id as next offset
+            next_offset = None
+            if users:
+                user_ids = [int(u.get('user_id') or u.get('id', 0)) for u in users if u.get('user_id') or u.get('id')]
+                next_offset = max(user_ids) if user_ids else None
+
+            print(f"✅ Fetched {len(users)} users. Next offset: {next_offset}", flush=True)
+            return users, next_offset
+
+        except Exception as e:
+            print(f"❌ Error fetching user preferences page: {e}", flush=True)
+            return [], None
+
+    def run_full_sync(self) -> int:
+        """Run full user preference sync with pagination and upsert.
+
+        Returns:
+            Number of users synced
+        """
+        try:
+            print("🔄 Starting API-based user preference sync...", flush=True)
+
+            total_synced = 0
+            offset = 0
+
+            while True:
+                # Fetch page
+                users, next_offset = self.fetch_user_preferences_page(offset, self.batch_size)
+
+                if not users:
+                    break
+
+                # Convert to DataFrame format for existing import method
+                df = pd.DataFrame(users)
+
+                # Get the UserPreferenceSyncManager to use its import method
+                temp_manager = UserPreferenceSyncManager(self.chroma_manager)
+                synced_count = temp_manager.import_user_preferences_from_dataframe(df)
+                total_synced += synced_count
+
+                print(f"✅ Synced batch of {synced_count} users (total: {total_synced})", flush=True)
+
+                # Check if there are more pages
+                if next_offset is None:
+                    break
+
+                offset = next_offset
+
+            self.last_sync_time = datetime.now()
+            self.last_sync_count = total_synced
+            print(f"✅ User preference sync completed. Total synced: {total_synced}", flush=True)
+            return total_synced
+
+        except Exception as e:
+            print(f"❌ Error during user preference sync: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return 0
+
+    def get_next_sync_time_ist(self) -> datetime:
+        """Calculate next sync time at 12:00 AM IST"""
+        # IST is UTC+5:30
+        ist_offset = timedelta(hours=5, minutes=30)
+        now_utc = datetime.now(timezone.utc)
+        now_ist = now_utc + ist_offset
+
+        # Calculate next midnight (12:00 AM IST)
+        next_sync_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+        return next_sync_ist
+
+    def start_scheduled_sync(self):
+        """Start scheduled user preference sync at 12:00 AM IST daily"""
+        if self.is_running:
+            print("⚠️ User preference API sync is already running", flush=True)
+            return
+
+        self.is_running = True
+
+        def sync_loop():
+            # Run initial sync immediately
+            print(f"🔄 Running initial user preference sync...", flush=True)
+            self.run_full_sync()
+
+            # Schedule daily sync at 12 AM IST
+            while self.is_running:
+                try:
+                    # Calculate time until next 12 AM IST
+                    ist_offset = timedelta(hours=5, minutes=30)
+                    now_utc = datetime.now(timezone.utc)
+                    now_ist = now_utc + ist_offset
+
+                    # Next 12 AM IST
+                    next_sync = now_ist.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+                    time_until_sync = (next_sync - now_ist).total_seconds()
+
+                    print(f"⏰ Next user sync scheduled at 12:00 AM IST ({next_sync.strftime('%Y-%m-%d %H:%M:%S')} IST)", flush=True)
+                    print(f"⏰ Time until next sync: {time_until_sync / 3600:.1f} hours", flush=True)
+
+                    # Sleep until next sync time (check every minute for stop signal)
+                    elapsed = 0
+                    while elapsed < time_until_sync and self.is_running:
+                        sleep_time = min(60, time_until_sync - elapsed)  # Sleep in 1-minute chunks
+                        time.sleep(sleep_time)
+                        elapsed += sleep_time
+
+                    # Run sync if still running
+                    if self.is_running:
+                        print(f"🔄 Running scheduled user preference sync (12:00 AM IST)...", flush=True)
+                        self.run_full_sync()
+
+                except Exception as e:
+                    print(f"❌ Error in scheduled sync loop: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    # Sleep 1 hour before retrying
+                    time.sleep(3600)
+
+        self.sync_thread = threading.Thread(target=sync_loop, daemon=True)
+        self.sync_thread.start()
+        print(f"✅ Started user preference scheduled sync (daily at 12:00 AM IST)", flush=True)
+
+    def stop_scheduled_sync(self):
+        """Stop scheduled synchronization"""
+        self.is_running = False
+        if self.sync_thread and self.sync_thread.is_alive():
+            self.sync_thread.join(timeout=5)
+        print("🛑 Stopped user preference scheduled sync")
+
+    def get_sync_status(self) -> dict:
+        """Get current sync status"""
+        return {
+            'is_running': self.is_running,
+            'last_sync_time': self.last_sync_time.isoformat() if self.last_sync_time else None,
+            'last_sync_count': self.last_sync_count,
+            'next_sync_time': self.get_next_sync_time_ist().isoformat() if self.is_running else None
+        }
+
 class MeetupBot:
     def __init__(self, auto_sync: bool = True):
         self.events_data = None
@@ -1632,6 +1807,11 @@ class MeetupBot:
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
+        self.user_api_sync_manager = UserPreferenceAPISyncManager(self.chroma_manager)
+
+        # Start daily user sync at 12 AM IST
+        print("🔄 Starting daily user preference sync (12:00 AM IST)...")
+        self.user_api_sync_manager.start_scheduled_sync()
 
         # Auto-sync on initialization (optional, enabled by default)
         if auto_sync:
@@ -2510,6 +2690,22 @@ Current user message: {user_message}"""
     def stop_user_preferences_sync(self):
         """Stop user preferences periodic sync."""
         self.user_pref_sync_manager.stop_periodic_sync()
+
+    def sync_users_once(self) -> int:
+        """Run a single user preference synchronization cycle using API
+
+        Returns:
+            Number of users synced
+        """
+        return self.user_api_sync_manager.run_full_sync()
+
+    def get_user_sync_status(self) -> dict:
+        """Get current user sync status
+
+        Returns:
+            dict with keys: is_running, last_sync_time, last_sync_count, next_sync_time
+        """
+        return self.user_api_sync_manager.get_sync_status()
 
     def start_with_sync(self, sync_interval_minutes: int = 2):
         """Start the bot with automatic event synchronization"""
