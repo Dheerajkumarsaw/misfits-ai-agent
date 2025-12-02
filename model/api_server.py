@@ -605,6 +605,30 @@ async def get_sync_status():
         "upcoming_events_api": bot.event_sync_manager.upcoming_api_url
     }
 
+@app.get("/api/cache/stats")
+async def get_cache_stats():
+    """
+    Get cache performance statistics
+    Shows hit rates, time saved, and cache efficiency metrics
+    """
+    bot = get_bot()
+    return bot.get_cache_stats()
+
+@app.post("/api/cache/clear")
+async def clear_caches(user_id: Optional[str] = None):
+    """
+    Clear cache entries
+    If user_id provided, clears only that user's cache
+    Otherwise clears all caches
+    """
+    bot = get_bot()
+    if user_id:
+        bot.invalidate_user_cache(user_id)
+        return {"success": True, "message": f"Cleared cache for user {user_id}"}
+    else:
+        bot.clear_all_caches()
+        return {"success": True, "message": "Cleared all caches"}
+
 @app.post("/api/sync/events")
 async def sync_events(full_sync: bool = False):
     """Trigger event synchronization"""

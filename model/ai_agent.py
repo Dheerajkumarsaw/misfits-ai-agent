@@ -1,6 +1,5 @@
 # Interactive Meetup Recommendation Bot with ChromaDB Integration
 # Install required packages at the start
-from pickle import FALSE
 import subprocess
 import sys
 
@@ -98,7 +97,7 @@ class EventDetailsForAgent:
                 if 'insert' in item:
                     plain_text += item['insert']
             return plain_text
-        except:
+        except Exception:
             return str(description)
 
     def _parse_datetime(self, time_obj):
@@ -120,9 +119,9 @@ class EventDetailsForAgent:
             # Convert to IST (UTC+5:30)
             ist_timezone = timezone(timedelta(hours=5, minutes=30))
             dt_ist = dt_utc.astimezone(ist_timezone)
-            
+
             return dt_ist.strftime("%Y-%m-%d %H:%M IST")
-        except:
+        except Exception:
             return str(time_obj)
 
     def to_dict(self):
@@ -281,7 +280,7 @@ class ChromaDBManager:
         if isinstance(description, list):
             try:
                 return " ".join([item.get('insert', '') for item in description])
-            except:
+            except Exception:
                 return str(description)
         return str(description)
 
@@ -374,12 +373,30 @@ class ChromaDBManager:
                    event.get('url') or ''
                )
                
+               # Parse start_time to create numeric timestamp for filtering
+               start_time_str = str(event.get('start_time', ''))
+               start_timestamp = 0  # Default to 0 if parsing fails
+
+               if start_time_str:
+                   try:
+                       from datetime import datetime
+                       # Parse datetime string (handle both "2025-09-10 15:00" and "2025-09-10 15:00 IST")
+                       try:
+                           event_dt = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M IST")
+                       except ValueError:
+                           event_dt = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
+                       # Convert to Unix timestamp (float)
+                       start_timestamp = event_dt.timestamp()
+                   except Exception as e:
+                       print(f"⚠️ Could not parse start_time '{start_time_str}' for event {event_id}: {e}")
+
                metadata = {
                   'event_id': event_id,
                   'name': str(event.get('event_name', '')),
                   'description': self._clean_description(event.get('description')),
                   'activity': str(event.get('activity', '')),
-                  'start_time': str(event.get('start_time', '')),
+                  'start_time': start_time_str,
+                  'start_timestamp': start_timestamp,  # Numeric timestamp for filtering
                   'end_time': str(event.get('end_time', '')),
                   'ticket_price': str(event.get('ticket_price', '')),
                   'event_url': str(event_url),
@@ -731,7 +748,7 @@ class ChromaDBManager:
         Args:
             query: Search query text
             n_results: Number of results to return
-            filters: Dictionary of filters to apply
+            filters: Dictionary of filters to apply (supports operators like $gte, $gt, $lte, $lt, $eq)
 
         Returns:
             List of event dictionaries with metadata
@@ -742,7 +759,16 @@ class ChromaDBManager:
                 "n_results": n_results
             }
             if filters:
-                where = {k: {"$eq": v} for k, v in filters.items()}
+                # Build where clause supporting comparison operators
+                where = {}
+                for key, value in filters.items():
+                    if isinstance(value, dict):
+                        # Already has operator (e.g., {"$gte": "2025-12-01"})
+                        where[key] = value
+                    else:
+                        # Simple equality
+                        where[key] = {"$eq": value}
+
                 if where:
                     params["where"] = where
 
@@ -1800,14 +1826,209 @@ class UserPreferenceAPISyncManager:
             'next_sync_time': self.get_next_sync_time_ist().isoformat() if self.is_running else None
         }
 
+# ============================================================================
+# PERFORMANCE CACHING SYSTEM
+# ============================================================================
+
+class PerformanceCacheManager:
+    """
+    Multi-tier in-memory cache for AI agent performance optimization
+
+    Cache Tiers:
+    - Tier 1: Query Analysis (LLM results) - Expensive, shared across users
+    - Tier 2: User Context (preferences) - Per-user, medium cost
+    - Tier 3: Vector Search (ChromaDB results) - Moderate cost, query-specific
+    - Tier 4: Final Results (complete responses) - Full response caching
+
+    Uses cachetools.TTLCache for automatic expiration
+    """
+
+    def __init__(self):
+        from cachetools import TTLCache
+
+        # Tier 1: Query Analysis Cache (user-independent, saves LLM calls)
+        # Key format: "qanalysis:{query_hash}:{pref_context_hash}"
+        self.query_analysis_cache = TTLCache(maxsize=1000, ttl=3600)  # 1 hour, 1000 queries
+
+        # Tier 2: User Context Cache (per-user preferences and metadata)
+        # Key format: "user_prefs:{user_id}"
+        self.user_context_cache = TTLCache(maxsize=10000, ttl=1800)  # 30 min, 10k users
+
+        # Tier 3: Vector Search Cache (ChromaDB search results)
+        # Key format: "vsearch:{search_query_hash}:{filters_hash}"
+        self.vector_search_cache = TTLCache(maxsize=2000, ttl=300)  # 5 min, 2000 searches
+
+        # Tier 4: Final Results Cache (complete recommendation responses)
+        # Key format: "results:{user_id}:{query_hash}:{city}"
+        self.results_cache = TTLCache(maxsize=3000, ttl=300)  # 5 min, 3000 results
+
+        # Cache statistics tracking
+        self.cache_stats = {
+            'hits': {
+                'query_analysis': 0,
+                'user_context': 0,
+                'vector_search': 0,
+                'results': 0
+            },
+            'misses': {
+                'query_analysis': 0,
+                'user_context': 0,
+                'vector_search': 0,
+                'results': 0
+            },
+            'total_time_saved_ms': 0,
+            'start_time': datetime.now()
+        }
+
+    def generate_cache_key(self, *args) -> str:
+        """
+        Generate stable, deterministic hash key from arguments
+
+        Args:
+            *args: Any number of arguments to hash together
+
+        Returns:
+            16-character MD5 hex hash
+        """
+        import hashlib
+        key_string = "|".join(str(arg) for arg in args)
+        return hashlib.md5(key_string.encode()).hexdigest()[:16]
+
+    def get_cache_stats(self) -> dict:
+        """
+        Get comprehensive cache performance statistics
+
+        Returns:
+            Dictionary with hit rates, time saved, and per-tier metrics
+        """
+        total_hits = sum(self.cache_stats['hits'].values())
+        total_misses = sum(self.cache_stats['misses'].values())
+        total_requests = total_hits + total_misses
+
+        uptime = (datetime.now() - self.cache_stats['start_time']).total_seconds()
+
+        return {
+            'overall': {
+                'hit_rate_percent': round((total_hits / total_requests * 100), 1) if total_requests > 0 else 0,
+                'total_hits': total_hits,
+                'total_misses': total_misses,
+                'total_requests': total_requests,
+                'time_saved_seconds': round(self.cache_stats['total_time_saved_ms'] / 1000, 2),
+                'uptime_seconds': round(uptime, 0)
+            },
+            'by_tier': {
+                'query_analysis': {
+                    'hits': self.cache_stats['hits']['query_analysis'],
+                    'misses': self.cache_stats['misses']['query_analysis'],
+                    'hit_rate': self._calculate_hit_rate('query_analysis')
+                },
+                'user_context': {
+                    'hits': self.cache_stats['hits']['user_context'],
+                    'misses': self.cache_stats['misses']['user_context'],
+                    'hit_rate': self._calculate_hit_rate('user_context')
+                },
+                'vector_search': {
+                    'hits': self.cache_stats['hits']['vector_search'],
+                    'misses': self.cache_stats['misses']['vector_search'],
+                    'hit_rate': self._calculate_hit_rate('vector_search')
+                },
+                'results': {
+                    'hits': self.cache_stats['hits']['results'],
+                    'misses': self.cache_stats['misses']['results'],
+                    'hit_rate': self._calculate_hit_rate('results')
+                }
+            },
+            'cache_sizes': {
+                'query_analysis': len(self.query_analysis_cache),
+                'user_context': len(self.user_context_cache),
+                'vector_search': len(self.vector_search_cache),
+                'results': len(self.results_cache)
+            }
+        }
+
+    def _calculate_hit_rate(self, tier: str) -> str:
+        """Calculate hit rate percentage for a specific cache tier"""
+        hits = self.cache_stats['hits'][tier]
+        misses = self.cache_stats['misses'][tier]
+        total = hits + misses
+        if total == 0:
+            return "0.0%"
+        return f"{(hits / total * 100):.1f}%"
+
+    def clear_all_caches(self):
+        """Clear all cache tiers (useful for testing or manual refresh)"""
+        self.query_analysis_cache.clear()
+        self.user_context_cache.clear()
+        self.vector_search_cache.clear()
+        self.results_cache.clear()
+        print("🗑️ All caches cleared")
+
+    def clear_user_cache(self, user_id: str):
+        """
+        Clear all cache entries for a specific user
+        Called when user updates their preferences
+
+        Args:
+            user_id: User ID to clear cache for
+        """
+        # Clear user context
+        user_pref_key = f"user_prefs:{user_id}"
+        if user_pref_key in self.user_context_cache:
+            del self.user_context_cache[user_pref_key]
+
+        # Clear results cache for this user (keys start with "results:{user_id}:")
+        results_keys_to_clear = [
+            k for k in list(self.results_cache.keys())
+            if isinstance(k, str) and k.startswith(f"results:{user_id}:")
+        ]
+        for key in results_keys_to_clear:
+            if key in self.results_cache:
+                del self.results_cache[key]
+
+        print(f"🗑️ Cleared cache for user {user_id} ({len(results_keys_to_clear) + 1} entries)")
+
 class MeetupBot:
     def __init__(self, auto_sync: bool = True):
+        # Initialize performance cache FIRST
+        self.cache_manager = PerformanceCacheManager()
+        print("✅ Performance caching system initialized")
+
         self.events_data = None
         self.user_conversations = {}  # Store conversation history per user_id
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
         self.user_api_sync_manager = UserPreferenceAPISyncManager(self.chroma_manager)
+
+        # ============================================================================
+        # ACTIVITY SIMILARITY MATCHING - Initialize once at class level
+        # ============================================================================
+        # Activity category mappings for semantic understanding
+        self.activity_categories = {
+            'sports': ['football', 'cricket', 'badminton', 'tennis', 'basketball', 'volleyball', 'swimming', 'box_cricket', 'pickleball'],
+            'outdoor_sports': ['football', 'cricket', 'tennis', 'hiking', 'trekking', 'cycling', 'running', 'badminton', 'pickleball'],
+            'indoor_sports': ['badminton', 'basketball', 'volleyball', 'chess', 'boardgaming', 'bowling'],
+            'fitness': ['gym', 'yoga', 'running', 'cycling', 'swimming', 'dance', 'mindfulness'],
+            'arts': ['art', 'dance', 'music', 'photography', 'drama', 'theater', 'poetry', 'writing'],
+            'creative': ['art', 'photography', 'content_creation', 'writing', 'poetry', 'drama'],
+            'tech': ['tech', 'technology', 'coding', 'startup', 'business', 'community_space'],
+            'entertainment': ['films', 'movies', 'music', 'pop_culture', 'quiz', 'drama', 'theater'],
+            'social': ['boardgaming', 'social_deductions', 'book_club', 'community_space', 'food', 'networking'],
+            'wellness': ['yoga', 'mindfulness', 'meditation', 'journaling', 'inner_journey']
+        }
+
+        # All available activities for fuzzy matching
+        self.all_activities_list = [
+            'football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
+            'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+            'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+            'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films',
+            'poetry', 'writing', 'harry_potter', 'pop_culture', 'community_space',
+            'content_creation', 'bowling', 'mindfulness', 'pickleball', 'journaling',
+            'quiz', 'drama', 'theater', 'basketball', 'volleyball', 'chess', 'gaming', 'reading'
+        ]
+
+        print("✅ Activity similarity matching initialized")
 
         # Start daily user sync at 12 AM IST
         print("🔄 Starting daily user preference sync (12:00 AM IST)...")
@@ -1842,6 +2063,113 @@ class MeetupBot:
             except Exception as e:
                 print(f"⚠️ Auto-sync failed: {e}")
                 print("You can manually sync with: bot.sync_events_once(full_sync=True)")
+
+    def find_similar_activities(self, activity: str, max_results: int = 10) -> list:
+        """
+        Find similar activities using fuzzy matching and category expansion
+
+        Args:
+            activity: Activity name to match (e.g., "sports", "outdoor activities", "footbal")
+            max_results: Maximum number of similar activities to return
+
+        Returns:
+            List of similar activity names (deduplicated)
+        """
+        from difflib import get_close_matches
+
+        activity_lower = activity.lower().strip()
+        similar_activities = []
+
+        # 1. Check if it's a category request (e.g., "sports", "fitness")
+        if activity_lower in self.activity_categories:
+            # Return all activities in this category
+            similar_activities.extend(self.activity_categories[activity_lower])
+            print(f"🏷️ Category match: '{activity}' → {len(similar_activities)} activities")
+            return similar_activities[:max_results]
+
+        # 2. Check for partial category matches (e.g., "outdoor activities" → "outdoor_sports")
+        for category, activities in self.activity_categories.items():
+            # Check if query contains category keywords
+            category_words = category.replace('_', ' ').lower()
+            if category_words in activity_lower or activity_lower in category_words:
+                similar_activities.extend(activities)
+                print(f"🏷️ Partial category match: '{activity}' matched '{category}' → {len(activities)} activities")
+
+        # 3. Exact match
+        if activity_lower in self.all_activities_list:
+            if activity_lower not in similar_activities:
+                similar_activities.append(activity_lower)
+                print(f"✅ Exact match: '{activity}'")
+
+        # 4. Fuzzy matching for typos and variations (e.g., "footbal" → "football")
+        fuzzy_matches = get_close_matches(
+            activity_lower,
+            self.all_activities_list,
+            n=min(3, max_results),
+            cutoff=0.85  # 85% similarity threshold (only match close typos, not random words)
+        )
+        for match in fuzzy_matches:
+            if match not in similar_activities:
+                similar_activities.append(match)
+                print(f"🔍 Fuzzy match: '{activity}' → '{match}'")
+
+        # 5. If still no matches, check if activity appears in any category
+        if not similar_activities:
+            for category, activities in self.activity_categories.items():
+                for cat_activity in activities:
+                    if activity_lower in cat_activity or cat_activity in activity_lower:
+                        if cat_activity not in similar_activities:
+                            similar_activities.append(cat_activity)
+                            print(f"🔎 Substring match: '{activity}' found in '{cat_activity}'")
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_activities = []
+        for act in similar_activities:
+            if act not in seen:
+                seen.add(act)
+                unique_activities.append(act)
+
+        return unique_activities[:max_results]
+
+    def _start_performance_timer(self):
+        """Start a new performance timing session"""
+        import time
+        self._perf_timer = {
+            'start_time': time.time(),
+            'checkpoints': [],
+            'last_checkpoint': time.time()
+        }
+
+    def _record_checkpoint(self, checkpoint_name: str):
+        """Record a performance timing checkpoint"""
+        import time
+        if not hasattr(self, '_perf_timer'):
+            return
+
+        current_time = time.time()
+        elapsed = (current_time - self._perf_timer['last_checkpoint']) * 1000  # ms
+
+        self._perf_timer['checkpoints'].append({
+            'name': checkpoint_name,
+            'elapsed_ms': round(elapsed, 2),
+            'total_ms': round((current_time - self._perf_timer['start_time']) * 1000, 2)
+        })
+        self._perf_timer['last_checkpoint'] = current_time
+
+    def _get_performance_report(self) -> dict:
+        """Get detailed performance timing report"""
+        if not hasattr(self, '_perf_timer'):
+            return {}
+
+        import time
+        total_time = (time.time() - self._perf_timer['start_time']) * 1000  # ms
+
+        return {
+            'total_ms': round(total_time, 2),
+            'checkpoints': self._perf_timer['checkpoints'],
+            'cache_stats': self.cache_manager.get_cache_stats()
+        }
 
     def _safe_float(self, value):
         """Safely convert value to float"""
@@ -1880,6 +2208,284 @@ class MeetupBot:
         # Keep only last 10 messages per user to avoid memory bloat
         if len(self.user_conversations[user_id]) > 10:
             self.user_conversations[user_id] = self.user_conversations[user_id][-10:]
+
+    def classify_query_intent(self, query: str, saved_preferences: dict = None) -> dict:
+        """
+        Classify user query to determine if it's asking for specific activities or generic events
+
+        Args:
+            query: User's natural language query
+            saved_preferences: User's saved preferences (if any)
+
+        Returns:
+            dict with:
+                - intent_type: "specific_activity", "generic_request", "preference_question", "casual_chat"
+                - confidence: 0.0-1.0
+                - override_preferences: bool (True if query should override saved preferences)
+        """
+        query_lower = query.lower().strip()
+
+        # Define explicit activity request patterns
+        specific_patterns = [
+            r'\b(show|find|get|looking for|search|want|interested in|need)\s+(me\s+)?(\w+)\s+(event|activity|meetup)',
+            r'\b(show|find|get)\s+(me\s+)?some\s+(\w+)',
+            r'\bi\s+(want to|would like to)\s+(play|do|try|join)\s+(\w+)',
+            r'\b(\w+)\s+events?\b',
+            r'\bevents?\s+(for|about|related to)\s+(\w+)',
+        ]
+
+        # Check if query has specific activity patterns
+        for pattern in specific_patterns:
+            if re.search(pattern, query_lower):
+                return {
+                    "intent_type": "specific_activity",
+                    "confidence": 0.9,
+                    "override_preferences": True
+                }
+
+        # Generic request patterns (use saved preferences)
+        generic_patterns = [
+            r'\b(find|show|get|recommend|suggest)\s+(me\s+)?(some\s+)?events?\b',
+            r'\bevents?\s+for\s+me\b',
+            r'\bwhat\s+events?\b',
+            r'\bany\s+events?\b',
+            r'\bevents?\s+happening\b',
+        ]
+
+        for pattern in generic_patterns:
+            if re.search(pattern, query_lower) and not any(re.search(sp, query_lower) for sp in specific_patterns):
+                return {
+                    "intent_type": "generic_request",
+                    "confidence": 0.8,
+                    "override_preferences": False
+                }
+
+        # Question about preferences or capabilities
+        question_patterns = [
+            r'\bwhat (can you|do you|are you)',
+            r'\bhow (do you|does)',
+            r'\bwho are you',
+            r'\btell me about',
+            r'\bwhat\'?s your',
+        ]
+
+        for pattern in question_patterns:
+            if re.search(pattern, query_lower):
+                return {
+                    "intent_type": "preference_question",
+                    "confidence": 0.85,
+                    "override_preferences": False
+                }
+
+        # Casual chat (greetings, small talk)
+        casual_patterns = [
+            r'^\b(hi|hello|hey|greetings|good morning|good evening)\b',
+            r'^\b(thanks|thank you|bye|goodbye)\b',
+        ]
+
+        for pattern in casual_patterns:
+            if re.search(pattern, query_lower):
+                return {
+                    "intent_type": "casual_chat",
+                    "confidence": 0.95,
+                    "override_preferences": False
+                }
+
+        # Default to generic if no clear pattern
+        return {
+            "intent_type": "generic_request",
+            "confidence": 0.5,
+            "override_preferences": False
+        }
+
+    def analyze_user_query(self, query: str, saved_preferences: dict = None) -> dict:
+        """
+        Use LLM to analyze user query and extract intent, activities, and preferences
+        NOW WITH INTELLIGENT CACHING - Same query = instant results!
+
+        Args:
+            query: User's natural language query
+            saved_preferences: User's saved preferences (optional)
+
+        Returns:
+            dict with extracted information:
+                - activities: List of requested activities
+                - location: Requested location (if any)
+                - budget: Budget constraints (if any)
+                - timing: Time preferences (if any)
+                - is_specific_request: Whether user is asking for specific activities
+                - should_override_saved: Whether to override saved preferences
+        """
+        import time
+        start_time = time.time()
+
+        try:
+            # ============================================================================
+            # CACHE CHECK - Avoid expensive LLM call if we've seen this query before
+            # ============================================================================
+            # Generate cache key based on query + preference context
+            pref_context = ""
+            if saved_preferences:
+                # Include activities in cache key (queries with different saved prefs may have different results)
+                activities = saved_preferences.get('activities', [])
+                if isinstance(activities, list):
+                    pref_context = ",".join(sorted(activities))
+
+            cache_key = f"qanalysis:{self.cache_manager.generate_cache_key(query.lower().strip())}:{self.cache_manager.generate_cache_key(pref_context)}"
+
+            # Check if we've analyzed this query before
+            if cache_key in self.cache_manager.query_analysis_cache:
+                cached_result = self.cache_manager.query_analysis_cache[cache_key]
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                # Update cache statistics
+                self.cache_manager.cache_stats['hits']['query_analysis'] += 1
+                self.cache_manager.cache_stats['total_time_saved_ms'] += 600  # Avg LLM call time
+
+                print(f"⚡ CACHE HIT: Query analysis from cache ({elapsed_ms:.1f}ms) - Saved ~600ms LLM call")
+                return cached_result
+
+            # Cache miss - need to run full analysis
+            self.cache_manager.cache_stats['misses']['query_analysis'] += 1
+            print(f"💭 Cache miss - Analyzing query with LLM...")
+
+            # First use classification to determine intent
+            intent_info = self.classify_query_intent(query, saved_preferences)
+
+            # Define all possible activities for reference
+            all_activities = [
+                'football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
+                'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+                'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+                'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films',
+                'poetry', 'writing', 'harry_potter', 'pop_culture', 'community_space',
+                'content_creation', 'bowling', 'mindfulness', 'pickleball',
+                'journaling', 'quiz', 'drama', 'theater', 'improv', 'sports', 'fitness',
+                'basketball', 'volleyball', 'chess', 'gaming', 'reading'
+            ]
+
+            # Prepare LLM prompt for query analysis
+            analysis_prompt = f"""Analyze the following user query and extract structured information.
+
+User Query: "{query}"
+
+{"User's Saved Preferences (for context): " + str(saved_preferences) if saved_preferences else "No saved preferences"}
+
+Available Activities: {', '.join(all_activities)}
+
+Task: Extract the following information from the query in JSON format:
+1. activities: List of specific activities the user is asking for (only if explicitly mentioned)
+2. location: Any city/area mentioned
+3. budget: Any budget/price constraints mentioned
+4. timing: Any time preferences (morning/evening/weekend/etc)
+5. is_specific_request: true if user is asking for specific activities, false if generic
+6. should_override_saved: true if this request should override saved preferences
+
+Examples:
+- "show me badminton events" → activities: ["badminton"], is_specific_request: true, should_override_saved: true
+- "find events for me" → activities: [], is_specific_request: false, should_override_saved: false
+- "looking for tennis in Mumbai" → activities: ["tennis"], location: "Mumbai", is_specific_request: true
+- "I want to try cricket" → activities: ["cricket"], is_specific_request: true
+
+Return ONLY a valid JSON object, no other text:"""
+
+            if client is None:
+                # Fallback to regex-based extraction if LLM is unavailable
+                print("⚠️ LLM unavailable, using fallback extraction")
+                fallback_result = self._fallback_query_analysis(query, all_activities, intent_info)
+                # Cache fallback result
+                self.cache_manager.query_analysis_cache[cache_key] = fallback_result
+                return fallback_result
+
+            # Call LLM for analysis
+            completion = client.chat.completions.create(
+                model="qwen/qwq-32b",
+                messages=[
+                    {"role": "system", "content": "You are a precise query analyzer. Extract information and return only valid JSON."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=500
+            )
+
+            response_text = completion.choices[0].message.content.strip()
+
+            # Extract JSON from response
+            json_match = re.search(r'\{[^}]+\}', response_text, re.DOTALL)
+            if json_match:
+                analysis_result = json.loads(json_match.group())
+
+                # Ensure all required fields are present
+                result = {
+                    "activities": analysis_result.get("activities", []),
+                    "location": analysis_result.get("location", ""),
+                    "budget": analysis_result.get("budget", ""),
+                    "timing": analysis_result.get("timing", ""),
+                    "is_specific_request": analysis_result.get("is_specific_request", False),
+                    "should_override_saved": analysis_result.get("should_override_saved", False),
+                    "confidence": intent_info.get("confidence", 0.7)
+                }
+
+                # Store result in cache for future use
+                self.cache_manager.query_analysis_cache[cache_key] = result
+
+                elapsed_ms = (time.time() - start_time) * 1000
+                print(f"🔍 Query Analysis: {result} (completed in {elapsed_ms:.1f}ms, cached for reuse)")
+                return result
+            else:
+                # If JSON parsing fails, use fallback
+                fallback_result = self._fallback_query_analysis(query, all_activities, intent_info)
+                # Cache fallback result too
+                self.cache_manager.query_analysis_cache[cache_key] = fallback_result
+                return fallback_result
+
+        except Exception as e:
+            print(f"⚠️ Error in query analysis: {e}")
+            # Fallback to regex-based extraction
+            fallback_result = self._fallback_query_analysis(query, all_activities, intent_info)
+            # Cache fallback result (better than nothing)
+            self.cache_manager.query_analysis_cache[cache_key] = fallback_result
+            return fallback_result
+
+    def _fallback_query_analysis(self, query: str, all_activities: list, intent_info: dict) -> dict:
+        """Fallback query analysis using regex when LLM is unavailable"""
+        query_lower = query.lower()
+
+        # Extract activities mentioned in query
+        found_activities = []
+        for activity in all_activities:
+            if re.search(rf'\b{re.escape(activity)}\b', query_lower):
+                found_activities.append(activity)
+
+        # Extract location
+        location = ""
+        location_match = re.search(r'\b(?:in|at|near|around)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\b', query, re.IGNORECASE)
+        if location_match:
+            location = location_match.group(1)
+
+        # Extract budget
+        budget = ""
+        budget_match = re.search(r'₹?\s*(\d+)(?:\s*-\s*₹?\s*(\d+))?|(?:under|below)\s+₹?\s*(\d+)', query)
+        if budget_match:
+            budget = budget_match.group(0)
+
+        # Extract timing
+        timing = ""
+        timing_patterns = ['weekend', 'weekday', 'morning', 'evening', 'afternoon', 'night', 'today', 'tomorrow']
+        for time_word in timing_patterns:
+            if time_word in query_lower:
+                timing = time_word
+                break
+
+        return {
+            "activities": found_activities,
+            "location": location,
+            "budget": budget,
+            "timing": timing,
+            "is_specific_request": len(found_activities) > 0 or intent_info["intent_type"] == "specific_activity",
+            "should_override_saved": intent_info.get("override_preferences", len(found_activities) > 0),
+            "confidence": 0.7
+        }
 
     def extract_events_from_response(self, response_text: str, fallback_events: list = None) -> list:
         """Extract structured event data from AI response text or use fallback"""
@@ -2031,7 +2637,6 @@ class MeetupBot:
             except Exception:
                 return False
         try:
-            import re
             # Look for patterns like [User ID: 123] or user_id: 123 or uid 123
             # First check for the format we're using: [User ID: 123]
             id_match = re.search(r"\[User ID:\s*(\d+)\]", user_message)
@@ -2124,7 +2729,6 @@ class MeetupBot:
             search_query = user_message
             if user_pref_context and "activities_summary" in user_pref_context:
                 # Extract activities from the preference context to enhance search
-                import re
                 activities = re.findall(r'activities_summary: ([^\n]+)', user_pref_context)
                 if activities and activities[0] != 'N/A':
                     search_query = f"{user_message} {activities[0]}"
@@ -2224,19 +2828,38 @@ RESPONSE FORMAT FOR EVENT RECOMMENDATIONS:
 - Each event object must include: event_id, name, club_name, activity, start_time, location (with venue, area, city), price, registration_url
 - Example: EVENTS_JSON: [{{"event_id": "123", "name": "Tech Meetup", "club_name": "Tech Club", "activity": "Technology", "start_time": "2024-01-20 18:00", "location": {{"venue": "Hub", "area": "Downtown", "city": "Mumbai"}}, "price": 500, "registration_url": "https://example.com"}}]
 
-CRITICAL USER PREFERENCE MATCHING:
-⭐ **DEFAULT BEHAVIOR**: When user has saved activity preferences, ALWAYS prioritize and return events matching those activities FIRST
-- If user has saved "cricket" preference → show ONLY cricket events unless they explicitly ask for something else
-- If user has saved "music, dance" preferences → show ONLY music and dance events unless they specify different activities
-- If user says "find events" or "events for me" → use their SAVED activity preferences automatically
-- If user says "show me badminton events" but their saved preference is cricket → show badminton (they explicitly requested different)
+CRITICAL USER PREFERENCE MATCHING - NEW INTELLIGENT SYSTEM:
+⭐ **SMART QUERY UNDERSTANDING**: The system now intelligently detects user intent and overrides saved preferences when needed
 
-**STRICT PREFERENCE ADHERENCE**:
-- User's saved activity preferences = their default interests
-- DO NOT mix unrelated activities unless user explicitly asks for variety
-- DO NOT recommend football events to a cricket-preferring user without explicit request
-- Better to show 2 relevant events than 10 irrelevant ones
-- Only deviate from saved preferences when user explicitly requests different activities
+**QUERY PRIORITY RULES** (in order of importance):
+1. **EXPLICIT ACTIVITY REQUEST** (Highest Priority)
+   - User says "show me badminton events" or "looking for tennis" → Show ONLY that activity
+   - Even if user has "cricket" saved preference → Override and show requested activity
+   - System analyzes query using LLM to detect explicit activity requests
+   - Examples:
+     * "find tennis events" + saved cricket → Show TENNIS events
+     * "I want to try badminton" + saved football → Show BADMINTON events
+     * "show me dance classes" + saved yoga → Show DANCE events
+
+2. **GENERIC EVENT REQUEST** (Use Saved Preferences)
+   - User says "find events" or "show me events" or "events for me" → Use SAVED preferences
+   - No specific activity mentioned → Use their saved activity preferences
+   - Examples:
+     * "find events for me" + saved cricket → Show CRICKET events
+     * "show me some events" + saved music → Show MUSIC events
+     * "what events are available" + saved yoga → Show YOGA events
+
+**IMPLEMENTATION DETAILS**:
+- System uses LLM-based query analysis to understand user intent
+- Query activities get +50% scoring boost vs saved preferences (+25%)
+- This ensures explicitly requested activities always rank higher
+- Saved preferences are ONLY used when query is generic (no specific activities mentioned)
+
+**KEY BEHAVIOR**:
+- Explicit request ALWAYS overrides saved preferences
+- Generic request ALWAYS uses saved preferences
+- Better to show 2 relevant requested events than 10 saved preference events
+- System is now smart enough to understand variations: "looking for", "interested in", "want to try"
 
 IMPORTANT - ONLY SHOW FUTURE EVENTS:
 - NEVER recommend events that have already passed
@@ -2439,7 +3062,7 @@ Current user message: {user_message}"""
                         for activity in ['football', 'cricket', 'tech', 'music', 'dance', 'yoga', 'hiking', 'food']:
                             if activity.lower() in activities_summary.lower():
                                 user_activities.append(activity)
-            except:
+            except Exception:
                 pass
 
         # Base greetings with variety - Miffy style
@@ -2529,7 +3152,6 @@ Current user message: {user_message}"""
             extracted_user_id = user_id
             if not extracted_user_id:
                 try:
-                    import re
                     id_match = re.search(r"(?:user[_ ]?id|uid|id)[:\s]*(\d+)", user_message, re.IGNORECASE)
                     if id_match:
                         extracted_user_id = id_match.group(1)
@@ -2537,7 +3159,7 @@ Current user message: {user_message}"""
                     bracket_match = re.search(r"\[User ID:\s*(\w+)\]", user_message, re.IGNORECASE)
                     if bracket_match:
                         extracted_user_id = bracket_match.group(1)
-                except:
+                except Exception:
                     pass
             
             # Get user-specific conversation history
@@ -2549,7 +3171,6 @@ Current user message: {user_message}"""
                 user_name = None
                 is_user_id_request = False
                 try:
-                    import re
                     # Check if this is a user ID request
                     if re.search(r"(?:find events?|events?)\s+for\s+user[_ ]?id\s+(\d+)", user_message, re.IGNORECASE):
                         is_user_id_request = True
@@ -2558,7 +3179,7 @@ Current user message: {user_message}"""
                     name_match = re.search(r"(?:i'm|i am|name is|this is)\s+([A-Z][a-z]+)", user_message, re.IGNORECASE)
                     if name_match:
                         user_name = name_match.group(1)
-                except:
+                except Exception:
                     pass
                 
                 # Only show greeting if it's not a user ID request
@@ -2707,6 +3328,33 @@ Current user message: {user_message}"""
         """
         return self.user_api_sync_manager.get_sync_status()
 
+    # ============================================================================
+    # CACHE MANAGEMENT METHODS
+    # ============================================================================
+
+    def invalidate_user_cache(self, user_id: str):
+        """
+        Invalidate all cache entries for a specific user
+        Call this when user updates their preferences to ensure fresh recommendations
+
+        Args:
+            user_id: User ID whose cache should be cleared
+        """
+        self.cache_manager.clear_user_cache(user_id)
+
+    def get_cache_stats(self) -> dict:
+        """
+        Get comprehensive cache performance statistics
+
+        Returns:
+            Dictionary with overall and per-tier cache metrics
+        """
+        return self.cache_manager.get_cache_stats()
+
+    def clear_all_caches(self):
+        """Clear all cache tiers (useful for testing or manual refresh)"""
+        self.cache_manager.clear_all_caches()
+
     def start_with_sync(self, sync_interval_minutes: int = 2):
         """Start the bot with automatic event synchronization"""
         # Start event synchronization in background
@@ -2801,21 +3449,65 @@ Current user message: {user_message}"""
         Returns:
             Structured JSON with recommendations filtered by current city
         """
+        # Start performance monitoring
+        self._start_performance_timer()
+
         try:
             user_id = request_data.get('user_id')
             user_current_city = request_data.get('user_current_city', '').lower().strip()
             query = request_data.get('query', '')
             override_preferences = request_data.get('preferences', {})
-            limit = request_data.get('limit', 5)  # Default to 5 recommendations
-            
-            # Get user preferences
+            limit = request_data.get('limit', 50)  # Default to 50 recommendations
+
+            self._record_checkpoint("Request parsing")
+
+            # ============================================================================
+            # TIER 4: RESULTS CACHE - Cache complete recommendation responses
+            # ============================================================================
+            # Generate cache key for final results (user + query + city specific)
+            results_cache_key = f"results:{user_id}:{self.cache_manager.generate_cache_key(query.lower().strip())}:{user_current_city}"
+
+            if results_cache_key in self.cache_manager.results_cache:
+                # Cache hit - return cached complete response
+                cached_response = self.cache_manager.results_cache[results_cache_key]
+                self.cache_manager.cache_stats['hits']['results'] += 1
+                self.cache_manager.cache_stats['total_time_saved_ms'] += 400  # Entire pipeline
+                self._record_checkpoint("Results cache HIT - returning cached response")
+                print(f"⚡⚡ TIER 4 CACHE HIT: Complete response from cache - Saved ~400ms (entire pipeline)")
+                return cached_response
+
+            # Cache miss - continue with full recommendation pipeline
+            self.cache_manager.cache_stats['misses']['results'] += 1
+            self._record_checkpoint("Results cache miss - proceeding with full pipeline")
+
+            # Get user preferences (with caching)
             user_preferences = {}
             if user_id:
-                print(f"🔍 Looking up preferences for user_id: {user_id}")
-                saved_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
+                # ============================================================================
+                # USER PREFERENCE CACHING - Avoid ChromaDB lookup for repeat users
+                # ============================================================================
+                cache_key = f"user_prefs:{user_id}"
+
+                if cache_key in self.cache_manager.user_context_cache:
+                    # Cache hit - use cached preferences
+                    saved_prefs = self.cache_manager.user_context_cache[cache_key]
+                    self.cache_manager.cache_stats['hits']['user_context'] += 1
+                    self.cache_manager.cache_stats['total_time_saved_ms'] += 70  # Avg DB lookup time
+                    print(f"⚡ CACHE HIT: User preferences for {user_id} - Saved ~70ms")
+                else:
+                    # Cache miss - fetch from ChromaDB
+                    print(f"🔍 Looking up preferences for user_id: {user_id}")
+                    saved_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
+
+                    # Store in cache if found
+                    if saved_prefs:
+                        self.cache_manager.user_context_cache[cache_key] = saved_prefs
+                        print(f"✅ Found user preferences (cached for reuse): {saved_prefs}")
+
+                    self.cache_manager.cache_stats['misses']['user_context'] += 1
+
                 if saved_prefs:
                     user_preferences = saved_prefs
-                    print(f"✅ Found user preferences: {user_preferences}")
                 else:
                     print(f"⚠️ No saved preferences found for user_id: {user_id}")
                     # Check if this is an event-finding request
@@ -2837,22 +3529,244 @@ Current user message: {user_message}"""
             # IMPORTANT: Set location filter based on explicit request or current city
             if user_current_city:
                 user_preferences['current_city'] = user_current_city
-                # Location will be determined later in the new logic based on explicit city requests
-            
-            # Build search query - PRIORITIZE CURRENT REQUEST OVER SAVED PREFERENCES
+
+            # ============================================================================
+            # NEW SMART QUERY ANALYSIS SYSTEM
+            # ============================================================================
+            # Use LLM-based query analyzer to understand user intent
+            print(f"🔍 Analyzing query: '{query}' with saved prefs: {user_preferences}")
+            query_analysis = self.analyze_user_query(query, user_preferences)
+            self._record_checkpoint("Query analysis completed")
+
+            # Extract analysis results
+            query_activities = query_analysis.get('activities', [])
+            query_location = query_analysis.get('location', '')
+            is_specific_request = query_analysis.get('is_specific_request', False)
+            should_override_saved = query_analysis.get('should_override_saved', False)
+
+            print(f"📊 Query Analysis Results:")
+            print(f"   - Activities: {query_activities}")
+            print(f"   - Location: {query_location}")
+            print(f"   - Is Specific: {is_specific_request}")
+            print(f"   - Override Saved: {should_override_saved}")
+
+            # ============================================================================
+            # SEMANTIC ACTIVITY EXPANSION - Expand category terms to specific activities
+            # ============================================================================
+            # If LLM didn't extract activities, check raw query for category keywords
+            if not query_activities:
+                query_lower = query.lower()
+                query_words = set(query_lower.split())
+
+                # Find the BEST matching category (most overlapping words)
+                best_match = None
+                best_overlap_count = 0
+
+                for category in self.activity_categories.keys():
+                    # Check for partial word matches (e.g., "outdoor" matches "outdoor_sports")
+                    category_words = set(category.replace('_', ' ').split())
+                    overlap = category_words & query_words  # Set intersection
+
+                    if overlap and len(overlap) > best_overlap_count:
+                        best_match = category
+                        best_overlap_count = len(overlap)
+
+                    # Check for exact category match (substring)
+                    category_normalized = category.replace('_', ' ')
+                    if (category_normalized in query_lower or category in query_lower):
+                        # Exact match gets highest priority (treat as full word count)
+                        if len(category_words) > best_overlap_count:
+                            best_match = category
+                            best_overlap_count = len(category_words)
+
+                # Use the best matching category
+                if best_match:
+                    query_activities = [best_match]
+                    print(f"🔍 Detected category keyword in query: '{best_match}' ({best_overlap_count} word overlap)")
+                    is_specific_request = True
+                    should_override_saved = True
+
+            # Expand activities (specific names or categories) to full lists
+            # Track if this is a category-based search for smarter query construction
+            is_category_search = False
+            original_category = None
+
+            if query_activities:
+                expanded_activities = []
+                for activity in query_activities:
+                    # Check if this is a category name
+                    if activity in self.activity_categories:
+                        is_category_search = True
+                        original_category = activity
+
+                    similar = self.find_similar_activities(activity, max_results=10)
+                    if similar:
+                        expanded_activities.extend(similar)
+                        if len(similar) > 1:
+                            print(f"🔄 Expanded '{activity}' → {similar}")
+                    else:
+                        expanded_activities.append(activity)
+
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_activities = []
+                for act in expanded_activities:
+                    if act not in seen:
+                        seen.add(act)
+                        unique_activities.append(act)
+
+                query_activities = unique_activities
+                print(f"✨ Final expanded activities: {query_activities}")
+
+                if is_category_search:
+                    print(f"🏷️ Category search detected - will use '{original_category}' for semantic matching")
+
+            # Get saved activities from preferences
+            saved_activities = []
+            if user_preferences and 'metadata' in user_preferences:
+                activities_summary = user_preferences.get('metadata', {}).get('activities_summary', '')
+                if activities_summary:
+                    # Extract activities from summary (format: Club|ACTIVITY|City...)
+                    activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                    saved_activities = [act.lower() for act in activity_matches]
+                    print(f"💾 Saved activities from metadata: {saved_activities}")
+            elif user_preferences:
+                saved_activities = user_preferences.get('activities', [])
+                print(f"💾 Saved activities: {saved_activities}")
+
+            # ============================================================================
+            # SMART PRIORITY SYSTEM FOR ACTIVITIES
+            # ============================================================================
+            final_activities = []
             search_query = query
-            explicit_activity_request = False
-            explicit_city_request = False
-            activities = []  # Saved activities from preferences
+
+            if should_override_saved and query_activities:
+                # User explicitly requested different activities - OVERRIDE saved preferences
+                final_activities = query_activities
+                search_query = ' '.join(query_activities)
+                print(f"🎯 OVERRIDE: Using query activities: {final_activities}")
+            elif is_specific_request and query_activities:
+                # User made a specific activity request - use it
+                final_activities = query_activities
+                search_query = ' '.join(query_activities)
+                print(f"🎯 SPECIFIC: Using query activities: {final_activities}")
+            elif saved_activities:
+                # Generic request or no specific activities - use saved preferences
+                final_activities = saved_activities
+                search_query = ' '.join(saved_activities)
+                print(f"💾 SAVED: Using saved activities: {final_activities}")
+            else:
+                # No saved preferences and no query activities - use full query
+                search_query = query
+                print(f"🔍 FALLBACK: Using full query: {search_query}")
+
+            # Determine final search location
+            final_location = query_location if query_location else (user_current_city if user_current_city else '')
+            if final_location:
+                search_query += f" {final_location}"
+                print(f"📍 Adding location to search: {final_location}")
+
+            # Build activity list for filtering/scoring
+            activities = final_activities if final_activities else saved_activities
+            explicit_activity_request = is_specific_request
+            explicit_city_request = bool(query_location)
             
-            # Comprehensive activity and city lists - includes all Misfits activities
-            all_activities = ['football', 'soccer', 'cricket', 'badminton', 'tennis', 'basketball', 'volleyball',
-                            'swimming', 'gym', 'yoga', 'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 
-                            'cycling', 'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
-                            'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv', 'sports', 'fitness',
-                            'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films', 'poetry', 
-                            'writing', 'harry_potter', 'pop_culture', 'community_space', 'content_creation', 
-                            'bowling', 'mindfulness', 'others']
+            # Activity types from database - EXACT MATCH to activity_type column
+            # These are the actual values stored in the database
+            all_activities_db = [
+                'ART', 'BADMINTON', 'BASKETBALL', 'BOARDGAMING', 'BOOK_CLUB', 'BOWLING', 'BOX_CRICKET',
+                'CHESS', 'COMMUNITY_SPACE', 'CONTENT_CREATION', 'CYCLING', 'DANCE', 'DEFAULT', 'DRAMA',
+                'FILMS', 'FOOD', 'FOOTBALL', 'HARRY_POTTER', 'HIKING', 'HNI', 'INNER_JOURNEY',
+                'JOURNALING', 'MINDFULNESS', 'MULTI_ACTIVITY_CLUB', 'MUSIC', 'OTHERS', 'PHOTOGRAPHY',
+                'PICKLEBALL', 'POETRY', 'POP_CULTURE', 'QUIZ', 'RUNNING', 'SOCIAL_DEDUCTIONS',
+                'TRAVEL', 'VIDEO_GAMES', 'VOLLEYBALL', 'WRITING', 'YOGA'
+            ]
+
+            # User-friendly activity mappings (user query → database activity_type)
+            activity_name_mapping = {
+                'art': 'ART',
+                'badminton': 'BADMINTON',
+                'basketball': 'BASKETBALL',
+                'board gaming': 'BOARDGAMING',
+                'boardgaming': 'BOARDGAMING',
+                'board games': 'BOARDGAMING',
+                'reading': 'BOOK_CLUB',
+                'book club': 'BOOK_CLUB',
+                'books': 'BOOK_CLUB',
+                'bowling': 'BOWLING',
+                'box cricket': 'BOX_CRICKET',
+                'cricket': 'BOX_CRICKET',  # Map general cricket to box cricket
+                'chess': 'CHESS',
+                'community': 'COMMUNITY_SPACE',
+                'community space': 'COMMUNITY_SPACE',
+                'content creation': 'CONTENT_CREATION',
+                'creator': 'CONTENT_CREATION',
+                'cycling': 'CYCLING',
+                'bike': 'CYCLING',
+                'biking': 'CYCLING',
+                'dance': 'DANCE',
+                'drama': 'DRAMA',
+                'theater': 'DRAMA',
+                'theatre': 'DRAMA',
+                'acting': 'DRAMA',
+                'films': 'FILMS',
+                'movies': 'FILMS',
+                'cinema': 'FILMS',
+                'food': 'FOOD',
+                'cooking': 'FOOD',
+                'culinary': 'FOOD',
+                'football': 'FOOTBALL',
+                'soccer': 'FOOTBALL',
+                'harry potter': 'HARRY_POTTER',
+                'hp': 'HARRY_POTTER',
+                'potterhead': 'HARRY_POTTER',
+                'hiking': 'HIKING',
+                'trekking': 'HIKING',
+                'trek': 'HIKING',
+                'journaling': 'JOURNALING',
+                'journal': 'JOURNALING',
+                'mindfulness': 'MINDFULNESS',
+                'meditation': 'MINDFULNESS',
+                'wellness': 'MINDFULNESS',
+                'music': 'MUSIC',
+                'photography': 'PHOTOGRAPHY',
+                'photo': 'PHOTOGRAPHY',
+                'pickleball': 'PICKLEBALL',
+                'pickle ball': 'PICKLEBALL',
+                'poetry': 'POETRY',
+                'poems': 'POETRY',
+                'pop culture': 'POP_CULTURE',
+                'popculture': 'POP_CULTURE',
+                'quiz': 'QUIZ',
+                'trivia': 'QUIZ',
+                'running': 'RUNNING',
+                'jogging': 'RUNNING',
+                'social deduction': 'SOCIAL_DEDUCTIONS',
+                'social deductions': 'SOCIAL_DEDUCTIONS',
+                'mafia': 'SOCIAL_DEDUCTIONS',
+                'werewolf': 'SOCIAL_DEDUCTIONS',
+                'travel': 'TRAVEL',
+                'video games': 'VIDEO_GAMES',
+                'gaming': 'VIDEO_GAMES',
+                'games': 'VIDEO_GAMES',
+                'volleyball': 'VOLLEYBALL',
+                'writing': 'WRITING',
+                'creative writing': 'WRITING',
+                'yoga': 'YOGA',
+                'fitness': 'YOGA',  # Could map to multiple
+                'tech': 'COMMUNITY_SPACE',  # Map tech to community space or others
+                'technology': 'COMMUNITY_SPACE',
+                'coding': 'COMMUNITY_SPACE',
+                'startup': 'COMMUNITY_SPACE',
+                'business': 'COMMUNITY_SPACE',
+                'networking': 'COMMUNITY_SPACE'
+            }
+
+            # Normalize activities for database queries
+            def normalize_activity(activity: str) -> str:
+                """Convert user-friendly activity name to database activity_type"""
+                activity_lower = activity.lower().strip()
+                return activity_name_mapping.get(activity_lower, activity.upper())
             
             city_keywords = ['mumbai', 'delhi', 'bangalore', 'bengaluru', 'pune', 'chennai', 'kolkata',
                            'noida', 'gurgaon', 'gurugram', 'hyderabad', 'ahmedabad', 'faridabad', 'ghaziabad',
@@ -2914,12 +3828,21 @@ Current user message: {user_message}"""
             explicit_city = None
             
             # Find explicitly mentioned activities
-            for activity in all_activities:
+            for activity in all_activities_db:
                 if activity in query_lower:
                     explicit_activities.append(activity)
                     explicit_activity_request = True
                     print(f"🎯 Found explicit activity in query: {activity}")
-            
+
+            # Add activities from category expansion to explicit_activities
+            if is_specific_request and activities:
+                # Normalize expanded activities to database format and add to explicit_activities
+                for activity in activities:
+                    normalized = activity_name_mapping.get(activity.lower(), activity.upper())
+                    if normalized not in explicit_activities:
+                        explicit_activities.append(normalized)
+                print(f"🎯 Added expanded activities to explicit filter: {explicit_activities}")
+
             # Find explicitly mentioned city
             for city in city_keywords:
                 if city in query_lower:
@@ -2928,8 +3851,8 @@ Current user message: {user_message}"""
                     print(f"🏙️ Found explicit city in query: {city}")
                     break
             
-            # STEP 2: Get saved preferences if available
-            if user_preferences:
+            # STEP 2: Get saved preferences if available (but don't override explicit requests)
+            if user_preferences and not should_override_saved:
                 print(f"🔍 Processing user preferences: {user_preferences}")
                 # Extract activities from user preferences (from metadata if available)
                 if 'metadata' in user_preferences:
@@ -2938,19 +3861,24 @@ Current user message: {user_message}"""
                     # Extract specific activities from the summary
                     if activities_summary:
                         # Parse the activities_summary format: "Club|ACTIVITY|City|Area|Count"
-                        import re
                         activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
                         for activity in activity_matches:
-                            activities.append(activity.lower())
-                        
+                            if activity.lower() not in activities:
+                                activities.append(activity.lower())
+
                         # Fallback: check for common activity keywords in summary
-                        for keyword in all_activities:
+                        for keyword in all_activities_db:
                             if keyword.lower() in activities_summary.lower() and keyword.lower() not in activities:
                                 activities.append(keyword.lower())
                 else:
-                    activities = user_preferences.get('activities', [])
-                
-                print(f"💾 Saved activities: {activities}")
+                    saved_prefs_activities = user_preferences.get('activities', [])
+                    for activity in saved_prefs_activities:
+                        if activity not in activities:
+                            activities.append(activity)
+
+                print(f"💾 Saved activities combined with query: {activities}")
+            elif user_preferences and should_override_saved:
+                print(f"🎯 Skipping saved preferences (user made explicit request)")
             
             # STEP 3: Determine search city priority
             if explicit_city:
@@ -2971,10 +3899,20 @@ Current user message: {user_message}"""
             
             if explicit_activities:
                 # User explicitly requested specific activities - highest priority
-                search_query = ' '.join(explicit_activities)
-                if search_city:
-                    search_query += f" {search_city}"
-                print(f"🎯 Using EXPLICIT activity request: {search_query}")
+                # For category searches, use category name (semantic) instead of expanded list
+                if is_category_search and original_category:
+                    # Use natural category name for better semantic matching
+                    category_natural = original_category.replace('_', ' ')
+                    search_query = category_natural
+                    if search_city:
+                        search_query += f" {search_city}"
+                    print(f"🎯 Using CATEGORY semantic search: '{search_query}' (will filter by: {explicit_activities})")
+                else:
+                    # Use lowercase natural language for vector search (not DB format)
+                    search_query = ' '.join(activities) if activities else ' '.join([act.lower() for act in explicit_activities])
+                    if search_city:
+                        search_query += f" {search_city}"
+                    print(f"🎯 Using EXPLICIT activity request: {search_query}")
             elif explicit_city and not explicit_activities:
                 # User asked for different city but no specific activity
                 if activities and is_generic_request:
@@ -3002,45 +3940,85 @@ Current user message: {user_message}"""
             if search_city:
                 user_preferences['location'] = search_city
                 print(f"📍 Set location preference to: {search_city}")
-            
-            # Get events
+
+            # ============================================================================
+            # VECTOR SEARCH CACHING - Avoid expensive ChromaDB vector search for repeat queries
+            # ============================================================================
             relevant_events = []
             if search_query:
-                # Get more results initially for better filtering
-                relevant_events = self.chroma_manager.search_events(search_query, n_results=limit * 3)
-            
-            # Filter out past events
+                # Generate cache key for vector search (based on query + location + limit)
+                vsearch_cache_key = f"vsearch:{self.cache_manager.generate_cache_key(search_query, final_location, limit)}"
+
+                if vsearch_cache_key in self.cache_manager.vector_search_cache:
+                    # Cache hit - use cached search results
+                    relevant_events = self.cache_manager.vector_search_cache[vsearch_cache_key]
+                    self.cache_manager.cache_stats['hits']['vector_search'] += 1
+                    self.cache_manager.cache_stats['total_time_saved_ms'] += 150  # Avg vector search time
+                    print(f"⚡ CACHE HIT: Vector search ({len(relevant_events)} events) - Saved ~150ms")
+                else:
+                    # Cache miss - perform actual vector search WITH date filtering
+                    # Filter by start_timestamp in ChromaDB to exclude past events BEFORE vector search
+                    from datetime import datetime
+
+                    # Get current timestamp for filtering
+                    current_timestamp = datetime.now().timestamp()
+
+                    # ChromaDB filter: start_timestamp >= current_time (numeric comparison)
+                    date_filter = {
+                        "start_timestamp": {"$gte": current_timestamp}  # Only upcoming events
+                    }
+
+                    print(f"🔍 Performing vector search for: '{search_query}' (upcoming events only)")
+                    print(f"📅 Date filter: start_timestamp >= {current_timestamp}")
+                    relevant_events = self.chroma_manager.search_events(
+                        search_query,
+                        n_results=limit * 3,  # 3x multiplier - category semantic search ensures quality
+                        filters=date_filter
+                    )
+
+                    # Store in cache
+                    self.cache_manager.vector_search_cache[vsearch_cache_key] = relevant_events
+                    self.cache_manager.cache_stats['misses']['vector_search'] += 1
+                    print(f"✅ Found {len(relevant_events)} events (cached for reuse)")
+
+            self._record_checkpoint("Vector search completed")
+
+            # Filter out past events by parsing start_time field
+            # (Not using ChromaDB filter to support events without start_timestamp field)
             from datetime import datetime
             current_time = datetime.now()
+            initial_count = len(relevant_events)
             future_events = []
+
             for event in relevant_events:
                 try:
-                    # Parse event start time
                     start_time_str = event.get('start_time', '')
                     if start_time_str:
-                        # Try to parse the datetime string, handling both formats
-                        # Format 1: "2025-09-10 15:00" or Format 2: "2025-09-10 15:00 IST"
+                        # Parse datetime (handle both "2025-09-10 15:00" and "2025-09-10 15:00 IST")
                         try:
-                            # First try with IST suffix
                             event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M IST")
                         except ValueError:
-                            # Fallback to format without IST
-                            event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
-                        # Only include future events
+                            try:
+                                event_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
+                            except ValueError:
+                                # If can't parse, include it
+                                future_events.append(event)
+                                continue
+
                         if event_time > current_time:
                             future_events.append(event)
-                        else:
-                            print(f"⏭️ Filtering out past event: {event.get('name', '')} - {start_time_str}")
                     else:
-                        # If no start time, include it (safer to show than hide)
+                        # No start time, include it
                         future_events.append(event)
-                except Exception as e:
-                    # If parsing fails, include the event (safer to show than hide)
-                    print(f"⚠️ Could not parse date for event {event.get('name', '')}: {e}")
+                except Exception:
+                    # Parsing failed, include it
                     future_events.append(event)
-            
+
             relevant_events = future_events
-            print(f"📅 Filtered to {len(relevant_events)} future events from {len(relevant_events) + (len(relevant_events) - len(future_events))} total")
+            past_filtered = initial_count - len(relevant_events)
+            if past_filtered > 0:
+                print(f"🗓️ Filtered out {past_filtered} past events")
+            print(f"📅 {len(relevant_events)} upcoming events ready for ranking")
             
             # ⭐ EXPLICIT ACTIVITY VALIDATION - When user explicitly requests activities, validate results match
             if explicit_activity_request and explicit_activities:
@@ -3099,7 +4077,6 @@ Current user message: {user_message}"""
                 user_preferred_activities = []
                 if activities_summary:
                     # Extract preferred activities from summary format: "Club|ACTIVITY|City|Area|Count"
-                    import re
                     activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
                     for activity in activity_matches:
                         user_preferred_activities.append(activity.lower())
@@ -3204,9 +4181,82 @@ Current user message: {user_message}"""
             # For explicit requests, skip scoring - user knows exactly what they want
             if explicit_activity_request and explicit_activities:
                 print(f"🚀 Explicit request detected - bypassing scoring for: {explicit_activities}")
+
+                # DIVERSIFICATION LOGIC: For category searches, diversify results by activity
+                events_to_format = []
+                if is_category_search and len(explicit_activities) > 1:
+                    # Category search (e.g., "outdoor sports") - diversify results
+                    print(f"🎨 Category search detected - diversifying results across {len(explicit_activities)} activities")
+
+                    # Group events by activity
+                    activity_groups = {}
+                    for event in relevant_events:
+                        activity = event.get('activity', '').upper()
+                        if activity not in activity_groups:
+                            activity_groups[activity] = []
+                        activity_groups[activity].append(event)
+
+                    # Show activity distribution
+                    activity_counts = {act: len(events) for act, events in activity_groups.items()}
+                    print(f"📊 Activity distribution: {activity_counts}")
+
+                    # Adjust max_per_activity based on number of activity types
+                    num_activity_types = len(activity_groups)
+                    if num_activity_types == 1:
+                        # Only one activity type - use all available up to limit
+                        max_per_activity = limit
+                        print(f"⚠️ Only 1 activity type available - will return up to {limit} events")
+                    elif num_activity_types == 2:
+                        # Two activities - allow more per activity
+                        max_per_activity = max(3, limit // 2 + 1)
+                    else:
+                        # Multiple activities - limit to 3 per activity for diversity
+                        max_per_activity = 3
+
+                    print(f"🎯 Max events per activity: {max_per_activity}")
+                    events_per_activity = {}  # Track how many we've taken from each
+
+                    # First pass: take 1 from each activity (ensure variety)
+                    for activity in sorted(activity_groups.keys()):
+                        if len(events_to_format) >= limit:
+                            break
+                        if activity_groups[activity]:
+                            events_to_format.append(activity_groups[activity].pop(0))
+                            events_per_activity[activity] = 1
+                            print(f"✅ Added 1 {activity} event (diversity pass)")
+
+                    # Second pass: fill remaining slots round-robin (max 3 per activity)
+                    while len(events_to_format) < limit:
+                        added_any = False
+                        for activity in sorted(activity_groups.keys()):
+                            if len(events_to_format) >= limit:
+                                break
+                            # Check if we haven't exceeded max per activity
+                            if events_per_activity.get(activity, 0) < max_per_activity and activity_groups[activity]:
+                                events_to_format.append(activity_groups[activity].pop(0))
+                                events_per_activity[activity] = events_per_activity.get(activity, 0) + 1
+                                added_any = True
+                                print(f"✅ Added 1 more {activity} event (count: {events_per_activity[activity]})")
+
+                        # If no more events can be added, break
+                        if not added_any:
+                            break
+
+                    # Show final distribution
+                    final_distribution = {}
+                    for event in events_to_format:
+                        activity = event.get('activity', '').upper()
+                        final_distribution[activity] = final_distribution.get(activity, 0) + 1
+                    print(f"🎯 Final event distribution: {final_distribution}")
+
+                else:
+                    # Specific activity search (e.g., "badminton events") - return all from that activity
+                    print(f"🎯 Specific activity search - returning top {limit} events")
+                    events_to_format = relevant_events[:limit]
+
+                # Format the selected events
                 formatted_events = []
-                
-                for event in relevant_events[:limit]:  # Take up to limit events directly
+                for event in events_to_format:
                     # Get all possible registration URLs
                     registration_url = (
                         event.get('event_url') or
@@ -3217,14 +4267,14 @@ Current user message: {user_message}"""
                         event.get('url') or
                         "Contact organizer for registration"
                     )
-                    
+
                     # Get event name with proper fallbacks
                     event_name = event.get('name', '').strip()
                     if not event_name:
                         event_name = event.get('event_name', '').strip()
                     if not event_name:
                         event_name = f"{event.get('activity', 'Event')} at {event.get('location_name', 'Venue')}"
-                    
+
                     event_data = {
                         "event_id": event.get('event_id', ''),
                         "name": event_name,
@@ -3249,14 +4299,14 @@ Current user message: {user_message}"""
                         "participants_count": self._safe_int(event.get('participants_count', 0))
                     }
                     formatted_events.append(event_data)
-                
+
                 requested_activities_str = ', '.join(explicit_activities)
                 # More conversational success message
                 if len(formatted_events) == 1:
                     success_message = f"Great! Found a perfect {requested_activities_str} event for you in {filter_city}!"
                 else:
                     success_message = f"Awesome! Found {len(formatted_events)} {requested_activities_str} events in {filter_city}!"
-                
+
                 return {
                     "success": True,
                     "recommendations": formatted_events,
@@ -3265,9 +4315,10 @@ Current user message: {user_message}"""
                 }
             
             # Score and format events (for non-explicit requests)
+            # Pass query_activities to scoring function for boost
             scored_events = []
             for event in relevant_events:
-                score = self._calculate_match_score_enhanced(event, user_preferences, filter_city)
+                score = self._calculate_match_score_enhanced(event, user_preferences, filter_city, query_activities=query_activities)
                 
                 # Get all possible registration URLs
                 registration_url = (
@@ -3333,13 +4384,29 @@ Current user message: {user_message}"""
                 message = f"Perfect! Found a great event that matches your interests in {filter_city}!" if filter_city else "Perfect! Found a great event that matches your interests!"
             else:
                 message = f"Excellent! Found {len(top_recommendations)} events that match your interests in {filter_city}!" if filter_city else f"Excellent! Found {len(top_recommendations)} events that match your interests!"
-            
-            return {
+
+            self._record_checkpoint("Event scoring and ranking completed")
+
+            # Prepare final response
+            final_response = {
                 "success": True,
                 "recommendations": top_recommendations,
                 "total_found": len(scored_events),
                 "message": message
             }
+
+            # ============================================================================
+            # TIER 4: Store result in cache before returning
+            # ============================================================================
+            self.cache_manager.results_cache[results_cache_key] = final_response
+            self._record_checkpoint("Result stored in cache")
+            print(f"💾 Stored complete response in Tier 4 cache for future requests")
+
+            # Get performance report for logging
+            perf_report = self._get_performance_report()
+            print(f"⏱️ Total request time: {perf_report.get('total_ms', 0)}ms")
+
+            return final_response
             
         except Exception as e:
             return {
@@ -3349,14 +4416,26 @@ Current user message: {user_message}"""
                 "message": f"Error: {str(e)}"
             }
 
-    def _calculate_match_score_enhanced(self, event: dict, preferences: dict, current_city: str = "") -> float:
-        """Enhanced scoring with dynamic city preference - works with ANY city"""
+    def _calculate_match_score_enhanced(self, event: dict, preferences: dict, current_city: str = "", query_activities: list = None) -> float:
+        """
+        Enhanced scoring with dynamic city preference and query activity boost
+
+        Args:
+            event: Event data dict
+            preferences: User preferences dict
+            current_city: Current city for location filtering
+            query_activities: Activities explicitly requested in current query (HIGHEST PRIORITY)
+
+        Returns:
+            Match score between 0.0 and 1.0
+        """
         score = 0.0
-        
-        # City match (highest priority - 35% weight)
+        query_activities = query_activities or []
+
+        # City match (highest priority - 30% weight)
         if current_city:
             event_city = event.get('city_name', '').lower().strip()
-            
+
             # Use the same city variations logic
             city_variations = {
                 'gurugram': ['gurugram', 'gurgaon'],
@@ -3368,64 +4447,65 @@ Current user message: {user_message}"""
                 'bangalore': ['bangalore', 'bengaluru'],
                 'bengaluru': ['bangalore', 'bengaluru']
             }
-            
+
             current_city_variations = city_variations.get(current_city, [current_city])
-            
+
             # Check if event city matches any variation
             for variation in current_city_variations:
                 if variation in event_city or event_city in variation:
-                    score += 0.35
+                    score += 0.30
                     break
-            
+
             # Also check direct match
             if score == 0 and (current_city in event_city or event_city in current_city):
-                score += 0.35
-        
-        # Activity match (50% weight - INCREASED for better preference matching)
-        user_activities = []
-        # Extract activities from metadata if available
-        if 'metadata' in preferences:
-            activities_summary = preferences.get('metadata', {}).get('activities_summary', '')
-            if activities_summary:
-                # Extract activities from the summary format: "Club|ACTIVITY|City|Area|Count"
-                import re
-                activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
-                for activity in activity_matches:
-                    user_activities.append(activity.lower())
-                
-                # Fallback: Extract specific activities - includes all Misfits activities
-                activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
-                                   'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
-                                   'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
-                                   'pickleball', 'journaling', 'quiz', 'drama', 'theater', 'improv',
-                                   'boardgaming', 'social_deductions', 'book_club', 'box_cricket', 'films', 
-                                   'poetry', 'writing', 'harry_potter', 'pop_culture', 'community_space', 
-                                   'content_creation', 'bowling', 'mindfulness', 'others', 'sports', 'fitness']
-                for keyword in activity_keywords:
-                    if keyword.lower() in activities_summary.lower() and keyword.lower() not in user_activities:
-                        user_activities.append(keyword.lower())
-        else:
-            user_activities = preferences.get('activities', [])
-        
+                score += 0.30
+
+        # ============================================================================
+        # QUERY ACTIVITY MATCH (HIGHEST PRIORITY - 50% weight)
+        # ============================================================================
+        # If user explicitly requested activities in current query, prioritize those
         event_activity = event.get('activity', '').lower()
-        if user_activities:
-            for activity in user_activities:
-                if activity.lower() in event_activity or event_activity in activity.lower():
-                    score += 0.50  # Increased weight for activity match
+        query_match_found = False
+
+        if query_activities:
+            for query_activity in query_activities:
+                query_act_lower = query_activity.lower()
+                if query_act_lower in event_activity or event_activity in query_act_lower:
+                    score += 0.50  # MAXIMUM boost for query-matched activities
+                    query_match_found = True
+                    print(f"🎯 QUERY MATCH BOOST: +0.50 for {event.get('name', '')} matching {query_activity}")
                     break
-            # Penalty for non-matching activities when user has preferences
+
+        # ============================================================================
+        # SAVED PREFERENCE ACTIVITY MATCH (25% weight - only if no query match)
+        # ============================================================================
+        # Only use saved preferences if query didn't match (prevents double scoring)
+        if not query_match_found:
+            user_activities = []
+            # Extract activities from metadata if available
+            if 'metadata' in preferences:
+                activities_summary = preferences.get('metadata', {}).get('activities_summary', '')
+                if activities_summary:
+                    # Extract activities from the summary format: "Club|ACTIVITY|City|Area|Count"
+                    activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                    for activity in activity_matches:
+                        user_activities.append(activity.lower())
             else:
-                score -= 0.20  # Penalize events that don't match user preferences
-        
-        # Area match (15% weight)
+                user_activities = preferences.get('activities', [])
+
+            if user_activities:
+                for activity in user_activities:
+                    if activity.lower() in event_activity or event_activity in activity.lower():
+                        score += 0.25  # Moderate weight for saved preference match
+                        print(f"💾 SAVED PREF MATCH: +0.25 for {event.get('name', '')} matching {activity}")
+                        break
+
+        # Area match (10% weight)
         user_areas = [area.lower() for area in preferences.get('areas', [])]
         event_area = event.get('area_name', '').lower()
         if user_areas and event_area in user_areas:
-            score += 0.15
-        
-        # Budget match removed per user request
-        # Budget filtering has been disabled
-        
+            score += 0.10
+
         # Availability (5% weight)
         available_spots = event.get('available_spots', 0)
         # Ensure numeric type
@@ -3435,7 +4515,7 @@ Current user message: {user_message}"""
             available_spots = 0
         if available_spots > 0:
             score += 0.05
-        
+
         return min(score, 1.0)
 
     def _generate_recommendation_reason_enhanced(self, event: dict, preferences: dict, score: float, current_city: str) -> str:
@@ -3517,7 +4597,7 @@ Current user message: {user_message}"""
             try:
                 user_prefs = self.chroma_manager.get_user_preferences_by_user_id(user_id)
                 has_preferences = bool(user_prefs)
-            except:
+            except Exception:
                 pass
         
         if not has_preferences:
@@ -3679,7 +4759,7 @@ Current user message: {user_message}"""
                 if not user_prefs:
                     message_list = self._generate_no_preferences_message(city)
                     return message_list  # Return list directly
-            except:
+            except Exception:
                 pass
         
         # Determine the type of null state based on query and context
