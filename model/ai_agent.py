@@ -707,27 +707,27 @@ class ChromaDBManager:
                 batch_num = i//batch_size + 1
                 
                 try:
-                    print(f"📦 DEBUG: Adding user prefs batch {batch_num}/{total_batches} with {len(batch_docs)} items", flush=True)
-                    
-                    # Try the actual ChromaDB add operation
-                    result = self.user_prefs_collection.add(
+                    print(f"📦 DEBUG: Upserting user prefs batch {batch_num}/{total_batches} with {len(batch_docs)} items", flush=True)
+
+                    # Try the actual ChromaDB upsert operation (insert new + update existing)
+                    result = self.user_prefs_collection.upsert(
                         documents=batch_docs,
                         metadatas=batch_meta,
                         ids=batch_ids
                     )
-                    print(f"🔧 DEBUG: ChromaDB add() returned: {result}", flush=True)
-                    
+                    print(f"🔧 DEBUG: ChromaDB upsert() returned: {result}", flush=True)
+
                     added_count += len(batch_docs)
-                    print(f"✅ DEBUG: Successfully added user prefs batch {batch_num}/{total_batches}", flush=True)
+                    print(f"✅ DEBUG: Successfully upserted user prefs batch {batch_num}/{total_batches}", flush=True)
                     
                 except Exception as e:
-                    print(f"❌ DEBUG: Failed to add user prefs batch {batch_num}: {str(e)}", flush=True)
+                    print(f"❌ DEBUG: Failed to upsert user prefs batch {batch_num}: {str(e)}", flush=True)
                     print(f"❌ DEBUG: Exception type: {type(e)}", flush=True)
                     import traceback
                     print(f"❌ DEBUG: Full traceback:\n{traceback.format_exc()}", flush=True)
                     continue
                     
-            print(f"✅ DEBUG: Final result - Added/updated {added_count} user preferences to ChromaDB", flush=True)
+            print(f"✅ DEBUG: Final result - Upserted {added_count} user preferences to ChromaDB", flush=True)
             
             # Verify the data was actually saved
             try:
