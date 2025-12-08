@@ -392,7 +392,7 @@ class ChromaDBManager:
 
                metadata = {
                   'event_id': event_id,
-                  'name': str(event.get('event_name', '')),
+                  'name': str(event.get('name', '')),  # Fixed: use 'name' not 'event_name' (to_dict returns 'name' key)
                   'description': self._clean_description(event.get('description')),
                   'activity': str(event.get('activity', '')),
                   'start_time': start_time_str,
@@ -2381,8 +2381,16 @@ Task: Extract the following information from the query in JSON format:
 5. is_specific_request: true if user is asking for specific activities, false if generic
 6. should_override_saved: true if this request should override saved preferences
 
+IMPORTANT RULES:
+- If user mentions a SPECIFIC activity name (like 'cricket', 'badminton', 'football'), return that EXACT activity
+- Do NOT generalize specific activities to categories (e.g., don't return 'sports' when user says 'cricket')
+- Only return broad categories like 'sports', 'fitness', 'arts' when user explicitly uses those category words
+- Preserve the specificity of the user's request
+
 Examples:
-- "show me badminton events" → activities: ["badminton"], is_specific_request: true, should_override_saved: true
+- "show me badminton events" → activities: ["badminton"], is_specific_request: true (NOT "sports")
+- "find cricket events for me" → activities: ["cricket"], is_specific_request: true (NOT "sports")
+- "looking for sports events" → activities: ["sports"], is_specific_request: true (category OK here)
 - "find events for me" → activities: [], is_specific_request: false, should_override_saved: false
 - "looking for tennis in Mumbai" → activities: ["tennis"], location: "Mumbai", is_specific_request: true
 - "I want to try cricket" → activities: ["cricket"], is_specific_request: true
@@ -2425,6 +2433,25 @@ Return ONLY a valid JSON object, no other text:"""
                     "should_override_saved": analysis_result.get("should_override_saved", False),
                     "confidence": intent_info.get("confidence", 0.7)
                 }
+
+                # Validation: Check if LLM incorrectly returned a category when user asked for specific activity
+                query_lower = query.lower()
+                llm_activities = result.get("activities", [])
+
+                # If LLM returned a category (like 'sports'), check if query contains a specific activity
+                if llm_activities and llm_activities[0] in self.activity_categories:
+                    # Check if query mentions a specific activity from that category
+                    category_name = llm_activities[0]
+                    specific_activities_in_category = self.activity_categories[category_name]
+
+                    for specific_activity in specific_activities_in_category:
+                        # Check if this specific activity is mentioned in the query
+                        if re.search(rf'\b{re.escape(specific_activity)}\b', query_lower):
+                            # User asked for specific activity, not the category!
+                            print(f"⚠️ LLM returned category '{category_name}' but query contains '{specific_activity}' - fixing!")
+                            result["activities"] = [specific_activity]
+                            result["is_specific_request"] = True
+                            break
 
                 # Store result in cache for future use
                 self.cache_manager.query_analysis_cache[cache_key] = result
