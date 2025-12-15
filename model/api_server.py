@@ -279,8 +279,13 @@ async def chat_with_bot(request: ChatRequest):
 
             # 4. Event search intent - positive action words + event context
             search_patterns = ["find", "search", "show me", "looking for", "want to", "interested in",
-                             "recommend", "suggest", "get me", "i need", "i want"]
-            event_words = ["event", "activity", "activities", "meetup", "game", "session", "class", "workshop"]
+                             "recommend", "suggest", "get me", "i need", "i want", "looking to", "looking up", "looking around", "looking out for", "hunt for", "seeking", "explore", "exploring", "browse", "browsing", "check out", "check for", "see if there are", "see if you can find"]
+            event_words = ["event","events", "activity", "activities", "meetup", "meetups", "meet-up",  "meet-ups", "meet","meets" , "game", "games", "match", "matches", "session", "sessions", "class","classes", "workshop", "workshops",
+            "jam", "jams",  "hike", "hikes" "hiking", "run", "runs", "running", "ride","rides", "cycling", "concert", "concerts", "festival", "festivals",
+            "exhibition", "exhibitions", "conference", "conferences", "seminar", "seminars", "webinar", "webinars", "party", "parties", "social", "socials" "gathering", "gatherings", "outing", "outings", "show", "shows", "performance", "performances", "tournament", "tournaments",
+             "hackathon", "hackathons", "bootcamp", "bootcamps", "retreat", "retreats", "networking", "network", "networks",
+             "lecture", "lectures", "talk", "talks", "discussion", "discussions", "debate", "debates", "league", "leagues", "championship", "championships",
+              "fitness", "workout", "workouts", "cooking", "cookings", "art", "arts", "craft", "crafts"]
 
             has_action = any(pattern in msg for pattern in search_patterns)
             has_event_context = any(word in msg for word in event_words)
