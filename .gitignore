@@ -1,2 +1,7 @@
 /venv
 /.DS_Store
+
+# Cache files
+model/cache_dump.pkl
+*.pyc
+__pycache__/

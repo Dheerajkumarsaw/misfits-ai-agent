@@ -3973,8 +3973,9 @@ Current user message: {user_message}"""
             # ============================================================================
             relevant_events = []
             if search_query:
-                # Generate cache key for vector search (based on query + location + limit)
-                vsearch_cache_key = f"vsearch:{self.cache_manager.generate_cache_key(search_query, final_location, limit)}"
+                # Generate cache key for vector search (based on user_id + query + location + limit)
+                # IMPORTANT: Must include user_id for personalized results
+                vsearch_cache_key = f"vsearch:{user_id}:{self.cache_manager.generate_cache_key(search_query, final_location, limit)}"
 
                 if vsearch_cache_key in self.cache_manager.vector_search_cache:
                     # Cache hit - use cached search results
