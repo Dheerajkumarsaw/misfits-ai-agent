@@ -1430,7 +1430,7 @@ async def websocket_chat(websocket: WebSocket):
                                 "success": True,
                                 "message": show_more_msg,
                                 "recommendations": next_events,
-                                "total_found": len(next_events),
+                                "total_found": session_info.get('total_events', len(next_events)),
                                 "has_more": has_more
                             })
                             continue
@@ -1471,26 +1471,42 @@ async def websocket_chat(websocket: WebSocket):
                 Returns:
                     True if user is asking for best/top recommendations from previous results
                 """
-                prompt = f"""Is the user asking for best/top/recommended picks from a previous list of events?
+                # Quick keyword check for common single-word queries (faster than LLM)
+                query_stripped = query.lower().strip()
+                if query_stripped in ['best', 'top', 'recommend', 'suggest', 'favorite', 'favourite']:
+                    print(f"🎯 Keyword match: '{query}' → suggest_best = True")
+                    return True
 
-User query: "{query}"
+                prompt = f"""Context: User is chatting with an event recommendation bot. They previously received a list of events.
 
-Answer with ONLY "yes" or "no".
+User's message: "{query}"
 
-Examples of YES (asking for best picks):
+Question: Is the user asking to curate/filter/rank the previous list (show best picks), OR are they making a new event search?
+
+Answer with ONLY "yes" (asking for best picks) or "no" (new search).
+
+Examples of YES (asking for best/top picks from previous results):
+- "best" → yes
+- "top" → yes
+- "recommend" → yes
 - "best for me" → yes
 - "which one is best" → yes
 - "help me decide" → yes
 - "your top pick" → yes
+- "top picks" → yes
 - "which should I attend" → yes
 - "can't decide, you choose" → yes
 - "what's your favorite" → yes
+- "what do you recommend" → yes
+- "most popular" → yes
 
-Examples of NO (new search):
+Examples of NO (new event search):
 - "football events" → no
 - "show me events" → no
 - "anything for me" → no
 - "events today" → no
+- "what's happening" → no
+- "find events" → no
 
 Answer:"""
 
@@ -1510,7 +1526,7 @@ Answer:"""
                     print(f"⚠️ LLM suggest_best detection failed: {e}")
                     return False  # Fallback: treat as new search
 
-            # Check if this is a "suggest best" query using LLM
+            # Check if this is a "suggest best" query (keyword first, then LLM)
             matches_best = is_suggest_best_query(query)
 
             if matches_best:
@@ -1737,7 +1753,7 @@ Answer:"""
             # Store events in session for "show more" functionality
             session_mgr = get_session_manager()
             if session_mgr and all_events:
-                session_mgr.store_events(user_id, all_events[:20], query)
+                session_mgr.store_events(user_id, all_events, query)
 
             # Show top 3 events initially
             events_to_show = all_events[:3]
