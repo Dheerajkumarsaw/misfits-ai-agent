@@ -2374,26 +2374,47 @@ User Query: "{query}"
 Available Activities: {', '.join(all_activities)}
 
 Task: Extract the following information from the query in JSON format:
-1. activities: List of specific activities the user is asking for (only if explicitly mentioned)
-2. location: Any city/area mentioned
-3. budget: Any budget/price constraints mentioned
-4. timing: Any time preferences (morning/evening/weekend/etc)
-5. is_specific_request: true if user is asking for specific activities, false if generic
-6. should_override_saved: true if this request should override saved preferences
+1. intent_type: Classify the query intent as one of:
+   - "greeting" - Casual greetings, small talk (hi, hello, how are you, what's up, how's it going, good morning, hey there, sup)
+     * Be lenient with typos like "how are u", "hw r u", "how r u", "how are u today/toad/tod"
+     * Focus on the greeting pattern, not perfect spelling
+   - "gratitude" - Thanks, appreciation, acknowledgment (thanks, thank you, appreciate it, kudos, cheers, much appreciated)
+   - "event_search" - User wants to find/discover events (show me events, what's available, anything for me, best for me)
+   - "bot_question" - Questions about bot capabilities (what can you do, how do you work, who are you)
+   - "other" - Other queries that don't fit above categories
 
-IMPORTANT RULES:
+2. activities: List of specific activities the user is asking for (only if explicitly mentioned)
+3. location: Any city/area mentioned
+4. budget: Any budget/price constraints mentioned
+5. timing: Any time preferences (morning/evening/weekend/etc)
+6. is_specific_request: true if user is asking for specific activities, false if generic
+7. should_override_saved: true if this request should override saved preferences
+
+IMPORTANT RULES FOR ACTIVITIES:
 - If user mentions a SPECIFIC activity name (like 'cricket', 'badminton', 'football'), return that EXACT activity
+- Be LENIENT with typos (e.g., "circket" → "cricket", "badmenton" → "badminton", "fotball" → "football")
+- Match to closest activity from the available list even if spelling is imperfect
 - Do NOT generalize specific activities to categories (e.g., don't return 'sports' when user says 'cricket')
 - Only return broad categories like 'sports', 'fitness', 'arts' when user explicitly uses those category words
 - Preserve the specificity of the user's request
 
 Examples:
-- "show me badminton events" → activities: ["badminton"], is_specific_request: true (NOT "sports")
-- "find cricket events for me" → activities: ["cricket"], is_specific_request: true (NOT "sports")
-- "looking for sports events" → activities: ["sports"], is_specific_request: true (category OK here)
-- "find events for me" → activities: [], is_specific_request: false, should_override_saved: false
-- "looking for tennis in Mumbai" → activities: ["tennis"], location: "Mumbai", is_specific_request: true
-- "I want to try cricket" → activities: ["cricket"], is_specific_request: true
+- "how are you" → intent_type: "greeting", activities: [], is_specific_request: false
+- "hi there" → intent_type: "greeting", activities: [], is_specific_request: false
+- "what's up" → intent_type: "greeting", activities: [], is_specific_request: false
+- "thanks" → intent_type: "gratitude", activities: [], is_specific_request: false
+- "thank you" → intent_type: "gratitude", activities: [], is_specific_request: false
+- "appreciate it" → intent_type: "gratitude", activities: [], is_specific_request: false
+- "much appreciated" → intent_type: "gratitude", activities: [], is_specific_request: false
+- "what can you do" → intent_type: "bot_question", activities: [], is_specific_request: false
+- "anything for me" → intent_type: "event_search", activities: [], is_specific_request: false
+- "show me badminton events" → intent_type: "event_search", activities: ["badminton"], is_specific_request: true
+- "find cricket events for me" → intent_type: "event_search", activities: ["cricket"], is_specific_request: true
+- "circket in noida" → intent_type: "event_search", activities: ["cricket"], location: "Noida", is_specific_request: true (typo corrected)
+- "looking for sports events" → intent_type: "event_search", activities: ["sports"], is_specific_request: true
+- "find events for me" → intent_type: "event_search", activities: [], is_specific_request: false
+- "looking for tennis in Mumbai" → intent_type: "event_search", activities: ["tennis"], location: "Mumbai", is_specific_request: true
+- "I want to try cricket" → intent_type: "event_search", activities: ["cricket"], is_specific_request: true
 
 Return ONLY a valid JSON object, no other text:"""
 
@@ -2425,6 +2446,7 @@ Return ONLY a valid JSON object, no other text:"""
 
                 # Ensure all required fields are present
                 result = {
+                    "intent_type": analysis_result.get("intent_type", "event_search"),  # NEW: Intent classification
                     "activities": analysis_result.get("activities", []),
                     "location": analysis_result.get("location", ""),
                     "budget": analysis_result.get("budget", ""),
@@ -3507,12 +3529,29 @@ Current user message: {user_message}"""
             self.cache_manager.cache_stats['misses']['results'] += 1
             self._record_checkpoint("Results cache miss - proceeding with full pipeline")
 
-            # Get user preferences (with caching)
+            # ============================================================================
+            # STEP 1: SMART QUERY ANALYSIS - Use LLM to understand intent FIRST
+            # ============================================================================
+            # Analyze query intent with LLM before checking preferences
+            # This makes the model truly smart - understands any natural language variation
+            print(f"🔍 Step 1: Analyzing query intent with LLM: '{query}'")
+
+            # Quick analysis with minimal preferences (just for intent detection)
+            preliminary_query_analysis = self.analyze_user_query(query, {})
+            query_activities = preliminary_query_analysis.get('activities', [])
+            is_specific_request = preliminary_query_analysis.get('is_specific_request', False)
+
+            print(f"📊 LLM Intent Analysis:")
+            print(f"   - Query Activities: {query_activities}")
+            print(f"   - Is Specific Request: {is_specific_request}")
+
+            # ============================================================================
+            # STEP 2: GET USER PREFERENCES (with caching)
+            # ============================================================================
             user_preferences = {}
+            saved_prefs = None
+
             if user_id:
-                # ============================================================================
-                # USER PREFERENCE CACHING - Avoid ChromaDB lookup for repeat users
-                # ============================================================================
                 cache_key = f"user_prefs:{user_id}"
 
                 if cache_key in self.cache_manager.user_context_cache:
@@ -3535,33 +3574,48 @@ Current user message: {user_message}"""
 
                 if saved_prefs:
                     user_preferences = saved_prefs
+                    print(f"✅ User has saved preferences")
                 else:
                     print(f"⚠️ No saved preferences found for user_id: {user_id}")
-                    # Check if this is an event-finding request
-                    event_keywords = ["event", "find", "recommend", "suggest", "show", "search", "looking for", "want"]
-                    if any(keyword in query.lower() for keyword in event_keywords):
-                        print(f"🚨 Event request detected without preferences - requesting preferences first")
-                        return {
-                            "success": False,
-                            "recommendations": [],
-                            "total_found": 0,
-                            "message": "I'd love to help you find events! To give you personalized recommendations, please tell me what activities and interests you enjoy.",
-                            "needs_preferences": True
-                        }
-            
+
+            # ============================================================================
+            # STEP 3: SMART VALIDATION - Check if we need preferences
+            # ============================================================================
+            # User is asking for events (any variation) BUT has no preferences AND no specific activities
+            # Use LLM's understanding instead of keyword matching
+            has_preferences = bool(saved_prefs)
+            has_specific_activities = bool(query_activities)
+
+            # If this is a generic event request without preferences or specific activities
+            # Examples: "anything for me", "what's available", "show me events", "got plans?"
+            if not has_preferences and not has_specific_activities:
+                # LLM determined this is NOT a specific request (generic like "anything for me")
+                # User has no saved preferences to fall back on
+                print(f"🚨 Generic event request without preferences or specific activities")
+                print(f"   - Has Preferences: {has_preferences}")
+                print(f"   - Has Specific Activities: {has_specific_activities}")
+                print(f"   - Query: '{query}'")
+                return {
+                    "success": False,
+                    "recommendations": [],
+                    "total_found": 0,
+                    "message": "I'd love to help you find events! To give you personalized recommendations, please tell me what activities and interests you enjoy.",
+                    "needs_preferences": True
+                }
+
             # Override with provided preferences
             if override_preferences:
                 user_preferences.update(override_preferences)
-            
+
             # IMPORTANT: Set location filter based on explicit request or current city
             if user_current_city:
                 user_preferences['current_city'] = user_current_city
 
             # ============================================================================
-            # NEW SMART QUERY ANALYSIS SYSTEM
+            # STEP 4: FULL QUERY ANALYSIS - Now with user preferences
             # ============================================================================
-            # Use LLM-based query analyzer to understand user intent
-            print(f"🔍 Analyzing query: '{query}' with saved prefs: {user_preferences}")
+            # Re-analyze query with full user preferences for better personalization
+            print(f"🔍 Step 4: Re-analyzing query with user preferences: {user_preferences}")
             query_analysis = self.analyze_user_query(query, user_preferences)
             self._record_checkpoint("Query analysis completed")
 
@@ -3653,13 +3707,19 @@ Current user message: {user_message}"""
             if user_preferences and 'metadata' in user_preferences:
                 activities_summary = user_preferences.get('metadata', {}).get('activities_summary', '')
                 if activities_summary:
-                    # Extract activities from summary (format: Club|ACTIVITY|City...)
-                    activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                    # Try extracting from structured format: Club|ACTIVITY|City...
+                    activity_matches = re.findall(r'\|([A-Za-z_]+)\|', activities_summary)  # Match both upper and lower
                     saved_activities = [act.lower() for act in activity_matches]
-                    print(f"💾 Saved activities from metadata: {saved_activities}")
+
+                    # Fallback: Parse comma-separated format (e.g., "football, dance, pickleball")
+                    if not saved_activities and ',' in activities_summary:
+                        saved_activities = [act.strip().lower() for act in activities_summary.split(',') if act.strip()]
+                        print(f"💾 Saved activities from CSV format: {saved_activities}")
+                    elif saved_activities:
+                        print(f"💾 Saved activities from structured format: {saved_activities}")
             elif user_preferences:
                 saved_activities = user_preferences.get('activities', [])
-                print(f"💾 Saved activities: {saved_activities}")
+                print(f"💾 Saved activities from root: {saved_activities}")
 
             # ============================================================================
             # SMART PRIORITY SYSTEM FOR ACTIVITIES
@@ -3683,9 +3743,31 @@ Current user message: {user_message}"""
                 search_query = ' '.join(saved_activities)
                 print(f"💾 SAVED: Using saved activities: {final_activities}")
             else:
-                # No saved preferences and no query activities - use full query
-                search_query = query
-                print(f"🔍 FALLBACK: Using full query: {search_query}")
+                # This block should RARELY be hit - means user passed line 3569 validation
+                # but saved_activities is still empty (data extraction issue)
+                print(f"⚠️ WARNING: Reached fallback block - saved_activities is empty")
+                print(f"   - has_preferences (from line 3564): {has_preferences}")
+                print(f"   - user_preferences: {user_preferences}")
+                print(f"   - saved_activities: {saved_activities}")
+                print(f"   - query_activities: {query_activities}")
+                print(f"   - is_specific_request: {is_specific_request}")
+
+                # If user has preferences but saved_activities is empty, it's a data format issue
+                # Use city-based generic search as fallback instead of blocking
+                if user_preferences:
+                    print(f"⚠️ User has preferences but saved_activities is empty - data extraction issue")
+                    print(f"🔍 FALLBACK: Will use city-based generic event search")
+                    search_query = query  # Use original query, city will be added below
+                else:
+                    # This should have been caught at line 3569, but adding safety check
+                    print(f"🚨 CRITICAL: No preferences and no activities - should have been caught earlier!")
+                    return {
+                        "success": False,
+                        "recommendations": [],
+                        "total_found": 0,
+                        "message": "I'd love to help you find events! To give you personalized recommendations, please tell me what activities and interests you enjoy.",
+                        "needs_preferences": True
+                    }
 
             # Determine final search location
             final_location = query_location if query_location else (user_current_city if user_current_city else '')
@@ -3888,15 +3970,23 @@ Current user message: {user_message}"""
                     # Extract specific activities from the summary
                     if activities_summary:
                         # Parse the activities_summary format: "Club|ACTIVITY|City|Area|Count"
-                        activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                        activity_matches = re.findall(r'\|([A-Za-z_]+)\|', activities_summary)  # Match both upper and lower
                         for activity in activity_matches:
                             if activity.lower() not in activities:
                                 activities.append(activity.lower())
 
-                        # Fallback: check for common activity keywords in summary
-                        for keyword in all_activities_db:
-                            if keyword.lower() in activities_summary.lower() and keyword.lower() not in activities:
-                                activities.append(keyword.lower())
+                        # CSV fallback: Parse comma-separated format (e.g., "football, dance, pickleball")
+                        if not activity_matches and ',' in activities_summary:
+                            for act in activities_summary.split(','):
+                                act = act.strip().lower()
+                                if act and act not in activities:
+                                    activities.append(act)
+
+                        # Keyword fallback: check for common activity keywords in summary
+                        if not activity_matches and ',' not in activities_summary:
+                            for keyword in all_activities_db:
+                                if keyword.lower() in activities_summary.lower() and keyword.lower() not in activities:
+                                    activities.append(keyword.lower())
                 else:
                     saved_prefs_activities = user_preferences.get('activities', [])
                     for activity in saved_prefs_activities:
@@ -4105,11 +4195,18 @@ Current user message: {user_message}"""
                 user_preferred_activities = []
                 if activities_summary:
                     # Extract preferred activities from summary format: "Club|ACTIVITY|City|Area|Count"
-                    activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                    activity_matches = re.findall(r'\|([A-Za-z_]+)\|', activities_summary)  # Match both upper and lower
                     for activity in activity_matches:
                         user_preferred_activities.append(activity.lower())
-                    
-                    # Fallback: Extract preferred activities from summary - includes all Misfits activities
+
+                    # CSV fallback: Parse comma-separated format (e.g., "football, dance, pickleball")
+                    if not activity_matches and ',' in activities_summary:
+                        for act in activities_summary.split(','):
+                            act = act.strip().lower()
+                            if act and act not in user_preferred_activities:
+                                user_preferred_activities.append(act)
+
+                    # Keyword fallback: Extract preferred activities from summary - includes all Misfits activities
                     activity_keywords = ['cricket', 'football', 'badminton', 'tennis', 'swimming', 'gym', 'yoga', 
                                        'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
                                        'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking', 
@@ -4515,9 +4612,16 @@ Current user message: {user_message}"""
                 activities_summary = preferences.get('metadata', {}).get('activities_summary', '')
                 if activities_summary:
                     # Extract activities from the summary format: "Club|ACTIVITY|City|Area|Count"
-                    activity_matches = re.findall(r'\|([A-Z_]+)\|', activities_summary)
+                    activity_matches = re.findall(r'\|([A-Za-z_]+)\|', activities_summary)  # Match both upper and lower
                     for activity in activity_matches:
                         user_activities.append(activity.lower())
+
+                    # CSV fallback: Parse comma-separated format (e.g., "football, dance, pickleball")
+                    if not activity_matches and ',' in activities_summary:
+                        for act in activities_summary.split(','):
+                            act = act.strip().lower()
+                            if act and act not in user_activities:
+                                user_activities.append(act)
             else:
                 user_activities = preferences.get('activities', [])
 
