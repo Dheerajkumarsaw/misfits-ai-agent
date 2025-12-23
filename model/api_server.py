@@ -1345,6 +1345,293 @@ async def readiness():
         # Return generic error to user (503 = service unavailable)
         raise HTTPException(status_code=503, detail="Service is not ready. Please try again later.")
 
+# ============================================================================
+# CONTEXT-AWARE INTENT DETECTION HELPERS
+# ============================================================================
+
+def format_conversation(messages: list) -> str:
+    """Format conversation history for LLM prompt"""
+    if not messages:
+        return "(No previous conversation)"
+
+    formatted = []
+    for msg in messages:
+        role = msg.get('role', 'unknown')
+        content = msg.get('content', '')
+        formatted.append(f"{role}: {content}")
+
+    return "\n".join(formatted)
+
+
+def detect_intent_with_context(query: str, user_id: str, bot, session_mgr) -> dict:
+    """
+    Use LLM to detect user intent WITH full conversation and session context
+
+    This replaces keyword-based and stateless intent detection with a smart
+    context-aware system that understands:
+    - Conversation history (what user said before)
+    - Session state (does user have previous results?)
+    - Query semantics (what does the query mean in context?)
+
+    Args:
+        query: Current user query
+        user_id: User ID for conversation lookup
+        bot: MeetupBot instance (for conversation history)
+        session_mgr: SessionManager instance (for session state)
+
+    Returns:
+        {
+            "intent": "best_picks" | "show_more" | "new_search" | "greeting" | "gratitude",
+            "reasoning": "Explanation of why this intent was chosen",
+            "confidence": 0.0-1.0
+        }
+    """
+    # Get conversation history (last 5 messages)
+    conversation = bot._get_user_conversation_history(user_id) if user_id else []
+    recent_conversation = conversation[-5:] if len(conversation) > 5 else conversation
+
+    # Get session state
+    session_info = session_mgr.get_session_info(user_id) if (session_mgr and user_id) else None
+    has_session = session_info and session_info.get('total_events', 0) > 0
+    events_count = session_info.get('total_events', 0) if session_info else 0
+    shown_count = session_info.get('current_index', 0) if session_info else 0
+
+    # ============================================================================
+    # FAST PATH: Check common keywords first (skip LLM for obvious cases)
+    # ============================================================================
+    query_lower = query.lower().strip()
+    has_events = has_session and events_count > 0
+
+    # Best picks keywords
+    best_keywords = ['best', 'top', 'recommend', 'suggest', 'favorite', 'favourite',
+                    'best for me', 'top for me', 'which is best', 'help me choose',
+                    'pick for me', 'which one', 'decide', 'choose for me']
+
+    # Show more keywords
+    more_keywords = ['more', 'next', 'show more', 'what else', 'any more',
+                    'continue', 'load more', 'see more']
+
+    # Greeting keywords
+    greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good evening',
+                        'how are you', 'what\'s up', 'sup']
+
+    # Gratitude keywords
+    thanks_keywords = ['thanks', 'thank you', 'appreciate', 'great', 'awesome',
+                      'perfect', 'amazing']
+
+    # Check keywords for fast return
+    if has_events and any(kw in query_lower for kw in best_keywords):
+        print(f"✅ Fast keyword match: 'best_picks' (session has {events_count} events)")
+        return {
+            "intent": "best_picks",
+            "reasoning": f"Keyword match + session has {events_count} events",
+            "confidence": 0.9
+        }
+    elif has_events and any(kw in query_lower for kw in more_keywords):
+        print(f"✅ Fast keyword match: 'show_more' (session has {events_count} events)")
+        return {
+            "intent": "show_more",
+            "reasoning": f"Keyword match + session has {events_count} events",
+            "confidence": 0.9
+        }
+    elif any(kw in query_lower for kw in greeting_keywords):
+        print(f"✅ Fast keyword match: 'greeting'")
+        return {"intent": "greeting", "reasoning": "Keyword match", "confidence": 0.95}
+    elif any(kw in query_lower for kw in thanks_keywords):
+        print(f"✅ Fast keyword match: 'gratitude'")
+        return {"intent": "gratitude", "reasoning": "Keyword match", "confidence": 0.95}
+
+    # Build context-rich prompt for LLM
+    context_prompt = f"""You are analyzing a user's intent in an event recommendation chatbot.
+
+CONVERSATION HISTORY (last 5 messages):
+{format_conversation(recent_conversation)}
+
+SESSION STATE:
+- User has previous results: {"Yes" if has_session else "No"}
+- Total events available: {events_count}
+- Events already shown: {shown_count}
+- More events available: {"Yes" if (events_count > shown_count) else "No"}
+
+CURRENT USER QUERY: "{query}"
+
+TASK: Determine the user's intent from these 5 options:
+
+1. "best_picks" - User wants you to PICK/RECOMMEND the BEST event(s) from previously shown results
+   Examples: "best for me", "which one is best", "top picks", "recommend one", "help me choose",
+             "which should I attend", "your top pick", "most suitable", "pick for me"
+   Requirements: User MUST have previous results in session
+
+2. "show_more" - User wants to see MORE events from the same search
+   Examples: "more", "show more", "next", "what else", "any more", "continue", "load more"
+   Requirements: User MUST have previous results AND more events available
+
+3. "new_search" - User wants a NEW/DIFFERENT event search
+   Examples: "show me cricket events", "find football", "events in Mumbai", "dance classes",
+             any query with specific activity/location/timing
+   Use this when: User mentions new criteria OR has no previous results
+
+4. "greeting" - Casual greeting or small talk
+   Examples: "hi", "hello", "how are you", "hey", "good morning"
+
+5. "gratitude" - Thanking or appreciation
+   Examples: "thanks", "thank you", "appreciate it", "great", "awesome"
+
+CRITICAL RULES:
+- If session has NO results → "best_picks" and "show_more" are IMPOSSIBLE → must be "new_search" (or greeting/gratitude)
+- If query mentions specific activities (cricket, dance, etc.) → likely "new_search"
+- If query is generic like "best/top" AND user has results → likely "best_picks"
+- If user just got results and says "more/next" → "show_more"
+
+IMPORTANT: You MUST respond with ONLY a valid JSON object. Do NOT include any explanations, reasoning text, or markdown.
+Do NOT write "Okay, let's analyze..." or any other text. ONLY output the JSON.
+
+Example correct response:
+{{"intent": "best_picks", "reasoning": "User asked 'best for me' and has 2 previous dance events in session", "confidence": 0.95}}
+
+Your JSON response:"""
+
+    try:
+        # Call LLM with context
+        response = llm_client.chat.completions.create(
+            model="qwen/qwq-32b",
+            messages=[{"role": "user", "content": context_prompt}],
+            temperature=0.1,
+            max_tokens=200
+        )
+
+        # Check if response is valid
+        if not response or not response.choices or len(response.choices) == 0:
+            print(f"⚠️ Invalid API response structure")
+            return {
+                "intent": "new_search",
+                "reasoning": "Invalid API response",
+                "confidence": 0.5
+            }
+
+        # Parse LLM response
+        llm_response = response.choices[0].message.content
+        if llm_response is None:
+            llm_response = ""
+        llm_response = llm_response.strip()
+        print(f"🔍 DEBUG: Raw LLM response: {llm_response[:500] if llm_response else '(empty)'}")  # Show first 500 chars
+
+        # Handle empty response
+        if not llm_response:
+            print(f"⚠️ Empty LLM response, defaulting to new_search")
+            return {
+                "intent": "new_search",
+                "reasoning": "Empty LLM response",
+                "confidence": 0.5
+            }
+
+        # Extract JSON from response (handle markdown code blocks and conversational text)
+        if "```json" in llm_response:
+            llm_response = llm_response.split("```json")[1].split("```")[0].strip()
+        elif "```" in llm_response:
+            llm_response = llm_response.split("```")[1].split("```")[0].strip()
+        else:
+            # Try to find JSON object in conversational response
+            # Look for { ... } pattern with proper nesting
+            # Find first { and try to match balanced braces
+            start = llm_response.find('{')
+            if start != -1:
+                # Simple approach: find matching closing brace
+                brace_count = 0
+                end = -1
+                for i in range(start, len(llm_response)):
+                    if llm_response[i] == '{':
+                        brace_count += 1
+                    elif llm_response[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end = i + 1
+                            break
+
+                if end != -1:
+                    extracted_json = llm_response[start:end]
+                    print(f"🔍 Extracted JSON from conversational response: {extracted_json}")
+                    llm_response = extracted_json
+
+        # Try to parse JSON
+        result = json.loads(llm_response)
+
+        print(f"🤖 Context-Aware Intent Detection:")
+        print(f"   - Query: '{query}'")
+        print(f"   - Session: {events_count} events, {shown_count} shown")
+        print(f"   - Intent: {result.get('intent')}")
+        print(f"   - Reasoning: {result.get('reasoning')}")
+        print(f"   - Confidence: {result.get('confidence')}")
+
+        return result
+
+    except json.JSONDecodeError as e:
+        print(f"⚠️ JSON parsing failed: {e}")
+        print(f"   Raw response was: {llm_response[:200] if 'llm_response' in locals() else 'N/A'}")
+
+        # FALLBACK: Use keyword-based detection when LLM fails
+        print(f"🔄 Falling back to keyword-based intent detection")
+        query_lower = query.lower().strip()
+
+        # Check if user has session with events
+        has_events = has_session and events_count > 0
+
+        # Best picks keywords
+        best_keywords = ['best', 'top', 'recommend', 'suggest', 'favorite', 'favourite',
+                        'best for me', 'top for me', 'which is best', 'help me choose',
+                        'pick for me', 'which one', 'decide', 'choose for me']
+
+        # Show more keywords
+        more_keywords = ['more', 'next', 'show more', 'what else', 'any more',
+                        'continue', 'load more', 'see more']
+
+        # Greeting keywords
+        greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good evening',
+                            'how are you', 'what\'s up', 'sup']
+
+        # Gratitude keywords
+        thanks_keywords = ['thanks', 'thank you', 'appreciate', 'great', 'awesome',
+                          'perfect', 'amazing']
+
+        # Check keywords in order of priority
+        if has_events and any(kw in query_lower for kw in best_keywords):
+            print(f"✅ Keyword fallback: 'best_picks' (has {events_count} events)")
+            return {
+                "intent": "best_picks",
+                "reasoning": f"Keyword match + session has {events_count} events",
+                "confidence": 0.8
+            }
+        elif has_events and any(kw in query_lower for kw in more_keywords):
+            print(f"✅ Keyword fallback: 'show_more' (has {events_count} events)")
+            return {
+                "intent": "show_more",
+                "reasoning": f"Keyword match + session has {events_count} events",
+                "confidence": 0.8
+            }
+        elif any(kw in query_lower for kw in greeting_keywords):
+            print(f"✅ Keyword fallback: 'greeting'")
+            return {"intent": "greeting", "reasoning": "Keyword match", "confidence": 0.9}
+        elif any(kw in query_lower for kw in thanks_keywords):
+            print(f"✅ Keyword fallback: 'gratitude'")
+            return {"intent": "gratitude", "reasoning": "Keyword match", "confidence": 0.9}
+        else:
+            print(f"✅ Keyword fallback: 'new_search' (default)")
+            return {
+                "intent": "new_search",
+                "reasoning": "No keyword match, treating as new search",
+                "confidence": 0.6
+            }
+    except Exception as e:
+        print(f"⚠️ Context-aware intent detection failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "intent": "new_search",
+            "reasoning": f"Error in LLM detection: {str(e)}",
+            "confidence": 0.5
+        }
+
+
 # Realtime chat over WebSocket
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
@@ -1363,322 +1650,133 @@ async def websocket_chat(websocket: WebSocket):
             user_id = payload.get("user_id")
             user_current_city = payload.get("user_current_city") or payload.get("city")
 
-            message_lower = query.lower().strip()
-
-            # PRIORITY: Check for session-based intents FIRST (before general intent detection)
-            # These need to be checked early because they're context-dependent
-
-            # Check "show more" intent - ONLY if user has an active session with events
-            show_more_keywords = [
-                # Direct "more" requests
-                "show more", "more events", "show me more", "give me more", "any more",
-                # Navigation
-                "next", "next events", "show next", "next one", "next few",
-                "continue", "keep going", "go on", "proceed",
-                # Loading more
-                "load more", "see more", "view more", "display more",
-                # Alternative phrasings
-                "what else", "anything else", "more options", "other options",
-                "additional events", "other events", "more like this", "similar ones",
-                # Casual requests
-                "show some more", "got more", "have more", "any others",
-                "more please", "another one", "few more", "couple more",
-                # Questions
-                "what other", "what more", "are there more", "do you have more",
-                "is there more", "got anything else", "anything more"
-            ]
-
-            # Check if this matches "show more" keywords
-            matches_show_more = message_lower.strip() == "more" or any(kw in message_lower for kw in show_more_keywords)
-
-            if matches_show_more:
-                # CRITICAL: Only handle as "show more" if user has an existing session with events
-                session_mgr = get_session_manager()
-                if session_mgr:
-                    session_info = session_mgr.get_session_info(user_id)
-                    # Check if session exists AND has events stored
-                    if session_info and session_info.get('total_events', 0) > 0:
-                        next_events = session_mgr.get_next_events(user_id, count=3)
-                        if next_events:
-                            # Add similar events to each event
-                            for event in next_events:
-                                similar_ids_str = event.get('similar_event_ids', '[]')
-                                try:
-                                    similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
-                                    if similar_ids and len(similar_ids) > 0:
-                                        similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
-                                        if similar_events_data and similar_events_data.get('metadatas'):
-                                            event['similar_events'] = similar_events_data['metadatas']
-                                except Exception as e:
-                                    print(f"⚠️ Failed to fetch similar events: {e}")
-
-                            has_more = session_info.get('has_more', False)
-
-                            # Generate natural "show more" message
-                            show_more_msg = generate_conversational_message(
-                                message_type="show_more",
-                                context={
-                                    "new_count": len(next_events),
-                                    "total_shown": session_info.get('current_index', len(next_events)),
-                                    "total_available": session_info.get('total_events', 0),
-                                    "activity": ""  # Could extract from session if needed
-                                }
-                            )
-
-                            await websocket.send_json({
-                                "type": "response",
-                                "success": True,
-                                "message": show_more_msg,
-                                "recommendations": next_events,
-                                "total_found": session_info.get('total_events', len(next_events)),
-                                "has_more": has_more
-                            })
-                            continue
-                        else:
-                            # No more events in session - generate end of results message
-                            end_msg = generate_conversational_message(
-                                message_type="end_of_results",
-                                context={
-                                    "total_shown": session_info.get('total_events', 0),
-                                    "activity": "",  # Could extract from session
-                                    "city": user_current_city
-                                }
-                            )
-
-                            await websocket.send_json({
-                                "type": "response",
-                                "success": False,
-                                "message": end_msg,
-                                "recommendations": [],
-                                "total_found": 0,
-                                "has_more": False
-                            })
-                            continue
-
-                # If keyword matched BUT no session with events exists, fall through to regular search
-                # This allows "show more sports events" to work as a new search on first message
+            # Track user query in conversation history
+            if user_id and query:
+                bot._add_to_user_conversation(user_id, "user", query)
+                print(f"💬 Added user message to conversation: '{query}' (user_id: {user_id})")
 
             # ============================================================================
-            # SMART "SUGGEST BEST" DETECTION - Use LLM instead of keyword matching
+            # CONTEXT-AWARE INTENT DETECTION
             # ============================================================================
-            def is_suggest_best_query(query: str) -> bool:
-                """
-                Use LLM to intelligently detect if user wants best picks from existing results
+            # Use LLM with full conversation and session context to determine intent
+            # This replaces all keyword-based and stateless detection
 
-                Args:
-                    query: User's message
+            session_mgr = get_session_manager()
+            intent_result = detect_intent_with_context(query, user_id, bot, session_mgr)
+            user_intent = intent_result.get("intent", "new_search")
 
-                Returns:
-                    True if user is asking for best/top recommendations from previous results
-                """
-                # Quick keyword check for common single-word queries (faster than LLM)
-                query_stripped = query.lower().strip()
-                if query_stripped in ['best', 'top', 'recommend', 'suggest', 'favorite', 'favourite']:
-                    print(f"🎯 Keyword match: '{query}' → suggest_best = True")
-                    return True
+            # ============================================================================
+            # HANDLE INTENT-SPECIFIC ACTIONS
+            # ============================================================================
 
-                prompt = f"""Context: User is chatting with an event recommendation bot. They previously received a list of events.
+            # Intent 1: BEST_PICKS - Return top events from session
+            if user_intent == "best_picks":
+                best_events = session_mgr.get_best_events(user_id, count=2)
+                if best_events:
+                    # Add similar events to each event
+                    for event in best_events:
+                        similar_ids_str = event.get('similar_event_ids', '[]')
+                        try:
+                            similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
+                            if similar_ids and len(similar_ids) > 0:
+                                similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
+                                if similar_events_data and similar_events_data.get('metadatas'):
+                                    event['similar_events'] = similar_events_data['metadatas']
+                        except Exception as e:
+                            print(f"⚠️ Failed to fetch similar events: {e}")
 
-User's message: "{query}"
-
-Question: Is the user asking to curate/filter/rank the previous list (show best picks), OR are they making a new event search?
-
-Answer with ONLY "yes" (asking for best picks) or "no" (new search).
-
-Examples of YES (asking for best/top picks from previous results):
-- "best" → yes
-- "top" → yes
-- "recommend" → yes
-- "best for me" → yes
-- "which one is best" → yes
-- "help me decide" → yes
-- "your top pick" → yes
-- "top picks" → yes
-- "which should I attend" → yes
-- "can't decide, you choose" → yes
-- "what's your favorite" → yes
-- "what do you recommend" → yes
-- "most popular" → yes
-
-Examples of NO (new event search):
-- "football events" → no
-- "show me events" → no
-- "anything for me" → no
-- "events today" → no
-- "what's happening" → no
-- "find events" → no
-
-Answer:"""
-
-                try:
-                    # Use global LLM client from ai_agent
-                    response = llm_client.chat.completions.create(
-                        model="qwen/qwq-32b",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.1,
-                        max_tokens=10
+                    # Generate best picks message
+                    best_picks_msg = generate_conversational_message(
+                        message_type="best_picks",
+                        context={
+                            "pick_count": len(best_events),
+                            "criteria": "match score and preferences",
+                            "activity": ""
+                        }
                     )
-                    answer = response.choices[0].message.content.strip().lower()
-                    is_best = "yes" in answer
-                    print(f"🤖 LLM suggest_best detection: '{query}' → {is_best}")
-                    return is_best
-                except Exception as e:
-                    print(f"⚠️ LLM suggest_best detection failed: {e}")
-                    return False  # Fallback: treat as new search
 
-            # Check if this is a "suggest best" query (keyword first, then LLM)
-            matches_best = is_suggest_best_query(query)
+                    await websocket.send_json({
+                        "type": "response",
+                        "success": True,
+                        "message": best_picks_msg,
+                        "recommendations": best_events,
+                        "total_found": len(best_events)
+                    })
+                    continue
+                else:
+                    print(f"⚠️ best_picks intent but no events in session")
 
-            if matches_best:
-                # CRITICAL: Only handle as "suggest best" if user has an existing session with events
-                session_mgr = get_session_manager()
+            # Intent 2: SHOW_MORE - Return next batch from session
+            elif user_intent == "show_more":
                 if session_mgr:
-                    session_info = session_mgr.get_session_info(user_id)
-                    # Check if session exists AND has events stored
-                    if session_info and session_info.get('total_events', 0) > 0:
-                        # Return only top 2 best events for a highly curated selection
-                        best_events = session_mgr.get_best_events(user_id, count=2)
-                        if best_events:
-                            # Add similar events to each event
-                            for event in best_events:
-                                similar_ids_str = event.get('similar_event_ids', '[]')
-                                try:
-                                    similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
-                                    if similar_ids and len(similar_ids) > 0:
-                                        similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
-                                        if similar_events_data and similar_events_data.get('metadatas'):
-                                            event['similar_events'] = similar_events_data['metadatas']
-                                except Exception as e:
-                                    print(f"⚠️ Failed to fetch similar events: {e}")
+                    next_events = session_mgr.get_next_events(user_id, count=3)
+                    if next_events:
+                        session_info = session_mgr.get_session_info(user_id)
 
-                            # Generate natural "best picks" message
-                            best_picks_msg = generate_conversational_message(
-                                message_type="best_picks",
-                                context={
-                                    "pick_count": len(best_events),
-                                    "criteria": "match score and preferences",
-                                    "activity": ""  # Could extract from best_events
-                                }
-                            )
+                        # Add similar events
+                        for event in next_events:
+                            similar_ids_str = event.get('similar_event_ids', '[]')
+                            try:
+                                similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
+                                if similar_ids and len(similar_ids) > 0:
+                                    similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
+                                    if similar_events_data and similar_events_data.get('metadatas'):
+                                        event['similar_events'] = similar_events_data['metadatas']
+                            except Exception as e:
+                                print(f"⚠️ Failed to fetch similar events: {e}")
 
-                            await websocket.send_json({
-                                "type": "response",
-                                "success": True,
-                                "message": best_picks_msg,
-                                "recommendations": best_events,
-                                "total_found": len(best_events)
-                            })
-                            continue
-                        else:
-                            # No events in session - generate helpful guidance message
-                            no_session_msg = generate_conversational_message(
-                                message_type="no_session",
-                                context={"query": query}
-                            )
+                        show_more_msg = generate_conversational_message(
+                            message_type="show_more",
+                            context={
+                                "new_count": len(next_events),
+                                "total_shown": session_info.get('current_index', 0),
+                                "total_available": session_info.get('total_events', 0),
+                                "activity": ""
+                            }
+                        )
 
-                            await websocket.send_json({
-                                "type": "response",
-                                "success": False,
-                                "message": no_session_msg,
-                                "recommendations": [],
-                                "total_found": 0
-                            })
-                            continue
+                        await websocket.send_json({
+                            "type": "response",
+                            "success": True,
+                            "message": show_more_msg,
+                            "recommendations": next_events,
+                            "total_found": session_info.get('total_events', len(next_events)),
+                            "has_more": session_info.get('has_more', False)
+                        })
+                        continue
+                else:
+                    # No more events
+                    end_msg = generate_conversational_message(
+                        message_type="end_of_results",
+                        context={"total_shown": 0, "activity": "", "city": user_current_city}
+                    )
+                    await websocket.send_json({
+                        "type": "response",
+                        "success": False,
+                        "message": end_msg,
+                        "recommendations": [],
+                        "total_found": 0,
+                        "has_more": False
+                    })
+                    continue
 
-                # If keyword matched BUT no session with events exists, fall through to regular search
-                # This allows "best sports events" to work as a new search on first message
-
-            # ============================================================================
-            # SMART INTENT DETECTION - Use LLM instead of keyword matching
-            # ============================================================================
-            # Let the backend LLM classify intent intelligently
-            # This handles any natural language variation: "how are you", "what's up", etc.
-            print(f"🔍 Using LLM to detect intent for: '{query}'")
-
-            try:
-                # Quick LLM analysis to get intent type
-                preliminary_analysis = bot.analyze_user_query(query, {})
-                llm_intent = preliminary_analysis.get('intent_type', 'event_search')
-                print(f"🤖 LLM detected intent: {llm_intent}")
-            except Exception as e:
-                print(f"⚠️ LLM intent detection failed: {e}, falling back to 'event_search'")
-                llm_intent = 'event_search'
-
-            # Map LLM intent types to our internal intents
-            # LLM returns: "greeting", "gratitude", "event_search", "bot_question", "other"
-            # We need: 'greeting', 'gratitude', 'question', 'search_events', 'restart', 'negative'
-
-            # Special cases: restart and negative (still use keyword check for these)
-            msg_lower = message_lower
-            if any(kw in msg_lower for kw in ["restart", "reset", "start over", "new conversation", "clear chat"]):
-                user_intent = 'restart'
-            elif any(kw in msg_lower for kw in ["don't want", "not interested", "no thanks", "never mind"]):
-                user_intent = 'negative'
-            elif llm_intent == 'greeting':
-                user_intent = 'greeting'
-            elif llm_intent == 'gratitude':
-                user_intent = 'gratitude'
-            elif llm_intent == 'bot_question':
-                user_intent = 'question'
-            elif llm_intent == 'event_search':
-                user_intent = 'search_events'
-            else:
-                # Default to event search for "other" category
-                user_intent = 'search_events'
-
-            print(f"✅ Final intent: {user_intent}")
-
-            # Handle different intents
-            if user_intent == 'restart':
-                # Restart conversation - clear history and greet
-                greeting_response = bot.generate_personalized_greeting(
-                    user_id=user_id,
-                    include_event_teaser=False
+            # Intent 3: GREETING - Casual conversation
+            elif user_intent == "greeting":
+                greeting_response = generate_conversational_message(
+                    message_type="greeting",
+                    context={"query": query, "user_id": user_id}
                 )
                 await websocket.send_json({
                     "type": "response",
                     "success": True,
-                    "message": f"🔄 Conversation restarted!\n\n{greeting_response}",
+                    "message": greeting_response,
                     "recommendations": [],
                     "total_found": 0
                 })
                 continue
 
-            elif user_intent == 'negative':
-                # User explicitly doesn't want events - graceful exit
-                graceful_msg = generate_conversational_message(
-                    message_type="graceful_exit",
-                    context={"query": query}
-                )
-                await websocket.send_json({
-                    "type": "response",
-                    "success": True,
-                    "message": graceful_msg,
-                    "recommendations": [],
-                    "total_found": 0
-                })
-                continue
-
-            elif user_intent == 'question':
-                # User asking about bot capabilities - generate personalized intro
-                capabilities_msg = generate_conversational_message(
-                    message_type="capabilities",
-                    context={
-                        "has_preferences": False,  # Could check actual preferences
-                        "city": user_current_city
-                    }
-                )
-                await websocket.send_json({
-                    "type": "response",
-                    "success": True,
-                    "message": capabilities_msg,
-                    "recommendations": [],
-                    "total_found": 0
-                })
-                continue
-
-            elif user_intent == 'gratitude':
-                # User expressing thanks - warm acknowledgment using LLM
+            # Intent 4: GRATITUDE - Thank you responses
+            elif user_intent == "gratitude":
                 gratitude_response = generate_conversational_message(
                     message_type="gratitude",
                     context={"query": query}
@@ -1692,20 +1790,8 @@ Answer:"""
                 })
                 continue
 
-            elif user_intent == 'greeting':
-                # Regular casual greeting - use LLM for natural, context-aware greeting
-                greeting_response = generate_conversational_message(
-                    message_type="greeting",
-                    context={"query": query, "user_id": user_id}
-                )
-                await websocket.send_json({
-                    "type": "response",
-                    "success": True,
-                    "message": greeting_response,
-                    "recommendations": [],
-                    "total_found": 0
-                })
-                continue
+            # Intent 5: NEW_SEARCH - Falls through to get_recommendations_with_json_extraction below
+            # Also handles any unrecognized intents as new search
 
             # Build recommendation request-compatible payload
             request_data = {
@@ -1754,6 +1840,7 @@ Answer:"""
             session_mgr = get_session_manager()
             if session_mgr and all_events:
                 session_mgr.store_events(user_id, all_events, query)
+                print(f"💾 Stored {len(all_events)} events in session for user_id: {user_id}, query: '{query}'")
 
             # Show top 3 events initially
             events_to_show = all_events[:3]
@@ -1809,6 +1896,11 @@ Answer:"""
                 "total_found": total_found,
                 "has_more": has_more
             }
+
+            # Track bot response in conversation history
+            if user_id and message:
+                bot._add_to_user_conversation(user_id, "assistant", message)
+                print(f"💬 Added bot response to conversation (user_id: {user_id})")
 
             await websocket.send_json(response_data)
     except WebSocketDisconnect:
