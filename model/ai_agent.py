@@ -2132,6 +2132,152 @@ class MeetupBot:
 
         return unique_activities[:max_results]
 
+    def map_activity_to_db_type(self, activity_name: str) -> str:
+        """
+        Map user-friendly activity name to database activity type (uppercase)
+
+        Args:
+            activity_name: Activity name from user query (e.g., "board games", "badminton")
+
+        Returns:
+            Database activity type string (e.g., "BOARDGAMING", "BADMINTON")
+        """
+        # Mapping from user-friendly names to exact database activity field values
+        activity_mapping = {
+            # Sports - Ball Games
+            'football': 'FOOTBALL',
+            'cricket': 'BOX_CRICKET',
+            'box_cricket': 'BOX_CRICKET',
+            'box cricket': 'BOX_CRICKET',
+            'badminton': 'BADMINTON',
+            'basketball': 'BASKETBALL',
+            'volleyball': 'VOLLEYBALL',
+            'pickleball': 'PICKLEBALL',
+            'pickle ball': 'PICKLEBALL',
+            'bowling': 'BOWLING',
+
+            # Sports - Fitness & Outdoor
+            'running': 'RUNNING',
+            'cycling': 'CYCLING',
+            'yoga': 'YOGA',
+            'hiking': 'HIKING',
+            'trekking': 'HIKING',
+
+            # Arts & Creative
+            'dance': 'DANCE',
+            'music': 'MUSIC',
+            'art': 'ART',
+            'photography': 'PHOTOGRAPHY',
+            'writing': 'WRITING',
+            'poetry': 'POETRY',
+
+            # Entertainment & Social
+            'boardgaming': 'BOARDGAMING',
+            'board gaming': 'BOARDGAMING',
+            'board games': 'BOARDGAMING',
+            'board game': 'BOARDGAMING',
+            'boardgame': 'BOARDGAMING',
+            'boardgames': 'BOARDGAMING',
+            'tabletop': 'BOARDGAMING',
+            'video_games': 'VIDEO_GAMES',
+            'gaming': 'VIDEO_GAMES',
+            'games': 'VIDEO_GAMES',
+            'chess': 'CHESS',
+            'drama': 'DRAMA',
+            'theater': 'DRAMA',
+            'theatre': 'DRAMA',
+            'films': 'FILMS',
+            'movies': 'FILMS',
+            'quiz': 'QUIZ',
+            'trivia': 'QUIZ',
+            'book_club': 'BOOK_CLUB',
+            'book club': 'BOOK_CLUB',
+            'reading': 'BOOK_CLUB',
+            'social_deductions': 'SOCIAL_DEDUCTIONS',
+            'social deductions': 'SOCIAL_DEDUCTIONS',
+
+            # Professional & Community
+            'community_space': 'COMMUNITY_SPACE',
+            'community space': 'COMMUNITY_SPACE',
+            'tech': 'COMMUNITY_SPACE',
+            'technology': 'COMMUNITY_SPACE',
+            'coding': 'COMMUNITY_SPACE',
+            'content_creation': 'CONTENT_CREATION',
+            'content creation': 'CONTENT_CREATION',
+
+            # Lifestyle & Wellness
+            'food': 'FOOD',
+            'cooking': 'FOOD',
+            'mindfulness': 'MINDFULNESS',
+            'meditation': 'MINDFULNESS',
+            'journaling': 'JOURNALING',
+            'inner_journey': 'INNER_JOURNEY',
+            'inner journey': 'INNER_JOURNEY',
+
+            # Special Interest
+            'harry_potter': 'HARRY_POTTER',
+            'harry potter': 'HARRY_POTTER',
+            'pop_culture': 'POP_CULTURE',
+            'pop culture': 'POP_CULTURE',
+            'travel': 'TRAVEL',
+
+            # Multi-purpose
+            'multi_activity_club': 'MULTI_ACTIVITY_CLUB',
+            'hni': 'HNI',
+            'others': 'OTHERS'
+        }
+
+        activity_lower = activity_name.lower().strip()
+        return activity_mapping.get(activity_lower, activity_name.upper())
+
+    def validate_event_activity(self, event: dict, required_activities: List[str]) -> bool:
+        """
+        Validate if event's activity matches the required activities
+
+        Args:
+            event: Event dictionary with 'activity' field
+            required_activities: List of required DB activity types (e.g., ["BOARDGAMING"])
+
+        Returns:
+            True if event matches, False otherwise
+        """
+        if not required_activities:
+            return True  # No filtering if no specific activity detected
+
+        event_activity = event.get('activity', '').upper()
+        return event_activity in required_activities
+
+    def format_activity_display(self, activity: str) -> str:
+        """
+        Convert database activity type to user-friendly display format
+
+        Args:
+            activity: Database activity type (e.g., "BOARDGAMING", "BOX_CRICKET")
+
+        Returns:
+            User-friendly display name (e.g., "Board Gaming", "Box Cricket")
+        """
+        # Special cases
+        display_mapping = {
+            'BOARDGAMING': 'Board Gaming',
+            'BOX_CRICKET': 'Box Cricket',
+            'VIDEO_GAMES': 'Video Games',
+            'BOOK_CLUB': 'Book Club',
+            'SOCIAL_DEDUCTIONS': 'Social Deductions',
+            'COMMUNITY_SPACE': 'Community Space',
+            'CONTENT_CREATION': 'Content Creation',
+            'INNER_JOURNEY': 'Inner Journey',
+            'HARRY_POTTER': 'Harry Potter',
+            'POP_CULTURE': 'Pop Culture',
+            'MULTI_ACTIVITY_CLUB': 'Multi Activity Club'
+        }
+
+        if activity.upper() in display_mapping:
+            return display_mapping[activity.upper()]
+
+        # Default: Title case with underscores replaced by spaces
+        return activity.replace('_', ' ').title()
+
     def _start_performance_timer(self):
         """Start a new performance timing session"""
         import time
@@ -2389,14 +2535,57 @@ Task: Extract the following information from the query in JSON format:
 5. timing: Any time preferences (morning/evening/weekend/etc)
 6. is_specific_request: true if user is asking for specific activities, false if generic
 7. should_override_saved: true if this request should override saved preferences
+8. search_intent: Classify event search intent as one of:
+   - "activity_specific" - User wants specific activities WITHOUT personalization context
+   - "personalized" - User wants recommendations based on their preferences/location
+   - "location_discovery" - User wants to explore ALL activities (no personalization)
+   - "exclusion" - User wants to exclude certain activities
+9. is_personalized: true if query has personalization indicators (see pattern rules below)
+10. exclude_activities: List of activities to exclude (empty if none)
 
 IMPORTANT RULES FOR ACTIVITIES:
-- If user mentions a SPECIFIC activity name (like 'cricket', 'badminton', 'football'), return that EXACT activity
-- Be LENIENT with typos (e.g., "circket" → "cricket", "badmenton" → "badminton", "fotball" → "football")
+- If user mentions a SPECIFIC activity name (like 'cricket', 'badminton', 'football', 'board games'), return that EXACT activity
+- Be LENIENT with typos (e.g., "circket" → "cricket", "badmenton" → "badminton", "fotball" → "football", "bord games" → "boardgaming")
 - Match to closest activity from the available list even if spelling is imperfect
 - Do NOT generalize specific activities to categories (e.g., don't return 'sports' when user says 'cricket')
 - Only return broad categories like 'sports', 'fitness', 'arts' when user explicitly uses those category words
 - Preserve the specificity of the user's request
+- CRITICAL: "board games", "board game", "boardgame" → ALWAYS return "boardgaming" (not "gaming" or "video_games")
+
+PERSONALIZATION PATTERN RECOGNITION:
+A query is "personalized" (is_personalized: true) if it contains ANY of these patterns:
+
+A. Possessive Pronouns indicating user context:
+   - "my", "mine" → Examples: "my area", "my preferences", "my city", "my interests"
+
+B. First Person in recommendation context:
+   - "for me", "to me", "I might like", "I should attend", "I'd enjoy"
+   - NOT grammatical: "show me", "find me", "tell me", "give me" are NOT personalized
+
+C. Proximity/Location relative to user:
+   - "around me", "near me", "close to me", "nearby", "in my area"
+
+D. Recommendation/Personalization requests:
+   - "suggest", "recommend", "suitable for", "tailored", "personalized", "best for me"
+
+E. User preference matching:
+   - "I might like", "I'd enjoy", "matching my", "based on my"
+
+CLASSIFICATION RULES FOR search_intent:
+1. Has personalization pattern + explicit activity
+   → search_intent: "personalized", activities: [explicit], is_personalized: true
+
+2. Has personalization pattern + no activity
+   → search_intent: "personalized", activities: [], is_personalized: true
+
+3. Explicit activity + NO personalization pattern
+   → search_intent: "activity_specific", is_personalized: false
+
+4. No activity + time keyword + NO personalization
+   → search_intent: "location_discovery", is_personalized: false
+
+5. Has "except", "not", "don't want" + activity
+   → search_intent: "exclusion", exclude_activities: [activity]
 
 Examples:
 - "how are you" → intent_type: "greeting", activities: [], is_specific_request: false
@@ -2411,10 +2600,30 @@ Examples:
 - "show me badminton events" → intent_type: "event_search", activities: ["badminton"], is_specific_request: true
 - "find cricket events for me" → intent_type: "event_search", activities: ["cricket"], is_specific_request: true
 - "circket in noida" → intent_type: "event_search", activities: ["cricket"], location: "Noida", is_specific_request: true (typo corrected)
+- "board games around me" → intent_type: "event_search", activities: ["boardgaming"], is_specific_request: true
+- "board game near me" → intent_type: "event_search", activities: ["boardgaming"], is_specific_request: true
+- "bord games in delhi" → intent_type: "event_search", activities: ["boardgaming"], location: "Delhi", is_specific_request: true (typo corrected)
 - "looking for sports events" → intent_type: "event_search", activities: ["sports"], is_specific_request: true
 - "find events for me" → intent_type: "event_search", activities: [], is_specific_request: false
 - "looking for tennis in Mumbai" → intent_type: "event_search", activities: ["tennis"], location: "Mumbai", is_specific_request: true
 - "I want to try cricket" → intent_type: "event_search", activities: ["cricket"], is_specific_request: true
+
+PERSONALIZATION EXAMPLES (with search_intent and is_personalized):
+- "board games around me" → intent_type: "event_search", search_intent: "personalized", activities: ["boardgaming"], is_personalized: true
+- "football near me" → intent_type: "event_search", search_intent: "personalized", activities: ["football"], is_personalized: true
+- "around me" → intent_type: "event_search", search_intent: "personalized", activities: [], is_personalized: true
+- "events for me" → intent_type: "event_search", search_intent: "personalized", activities: [], is_personalized: true
+- "events close to me" → intent_type: "event_search", search_intent: "personalized", activities: [], is_personalized: true
+- "what's happening in my area" → intent_type: "event_search", search_intent: "personalized", activities: [], is_personalized: true
+- "activities I might like" → intent_type: "event_search", search_intent: "personalized", activities: [], is_personalized: true
+- "something suitable for me" → intent_type: "event_search", search_intent: "personalized", activities: [], is_personalized: true
+- "Delhi around me" → intent_type: "event_search", search_intent: "personalized", location: "Delhi", is_personalized: true
+- "show me board games" → intent_type: "event_search", search_intent: "activity_specific", activities: ["boardgaming"], is_personalized: false
+- "board games event tomorrow" → intent_type: "event_search", search_intent: "activity_specific", activities: ["boardgaming"], timing: "tomorrow", is_personalized: false
+- "badminton in Delhi" → intent_type: "event_search", search_intent: "activity_specific", activities: ["badminton"], location: "Delhi", is_personalized: false
+- "today top events" → intent_type: "event_search", search_intent: "location_discovery", timing: "today", is_personalized: false
+- "what's happening tonight" → intent_type: "event_search", search_intent: "location_discovery", timing: "tonight", is_personalized: false
+- "anything except cricket" → intent_type: "event_search", search_intent: "exclusion", exclude_activities: ["cricket"], is_personalized: false
 
 Return ONLY a valid JSON object, no other text:"""
 
@@ -2453,7 +2662,11 @@ Return ONLY a valid JSON object, no other text:"""
                     "timing": analysis_result.get("timing", ""),
                     "is_specific_request": analysis_result.get("is_specific_request", False),
                     "should_override_saved": analysis_result.get("should_override_saved", False),
-                    "confidence": intent_info.get("confidence", 0.7)
+                    "confidence": intent_info.get("confidence", 0.7),
+                    # NEW FIELDS for LLM-based intent detection
+                    "search_intent": analysis_result.get("search_intent", "location_discovery"),
+                    "is_personalized": analysis_result.get("is_personalized", False),
+                    "exclude_activities": analysis_result.get("exclude_activities", [])
                 }
 
                 # Validation: Check if LLM incorrectly returned a category when user asked for specific activity
@@ -2533,7 +2746,11 @@ Return ONLY a valid JSON object, no other text:"""
             "timing": timing,
             "is_specific_request": len(found_activities) > 0 or intent_info["intent_type"] == "specific_activity",
             "should_override_saved": intent_info.get("override_preferences", len(found_activities) > 0),
-            "confidence": 0.7
+            "confidence": 0.7,
+            # NEW FIELDS (fallback - can't detect patterns without LLM)
+            "search_intent": "activity_specific" if found_activities else "location_discovery",
+            "is_personalized": False,  # Can't detect personalization patterns without LLM
+            "exclude_activities": []
         }
 
     def extract_events_from_response(self, response_text: str, fallback_events: list = None) -> list:
@@ -3586,6 +3803,72 @@ Current user message: {user_message}"""
             has_preferences = bool(saved_prefs)
             has_specific_activities = bool(query_activities)
 
+            # ============================================================================
+            # STEP 3.5: CONVERSATION HISTORY FALLBACK
+            # ============================================================================
+            # If no saved preferences and no activities in current query,
+            # check conversation history for recently mentioned activities
+            # This handles follow-up queries like "best for me" after user said "I like cricket"
+            if not has_preferences and not has_specific_activities and user_id:
+                user_history = self._get_user_conversation_history(user_id)
+                if user_history and len(user_history) > 0:
+                    print(f"🔍 No preferences found - checking conversation history ({len(user_history)} messages)")
+
+                    # Only analyze USER messages (exclude assistant responses and current query)
+                    # The last message in history is the current query, so we exclude it with [:-1]
+                    user_messages = [msg.get('content', '') for msg in user_history
+                                   if msg.get('role') == 'user']
+
+                    # Exclude the current query (last user message)
+                    if len(user_messages) > 1:
+                        previous_user_messages = user_messages[:-1]
+                    else:
+                        previous_user_messages = user_messages
+
+                    if previous_user_messages:
+                        # Analyze last 3 user messages for activities
+                        recent_user_text = " ".join(previous_user_messages[-3:])
+                        print(f"🔍 Analyzing user message history: '{recent_user_text}'")
+
+                        # Use LLM to extract activities from user's previous messages
+                        history_analysis = self.analyze_user_query(recent_user_text, {})
+                        history_activities = history_analysis.get('activities', [])
+
+                        if history_activities:
+                            print(f"✅ Found activities in conversation history: {history_activities}")
+                            query_activities = history_activities
+                            has_specific_activities = True
+
+                            # Update user preferences with conversation-based activities
+                            user_preferences['activities'] = history_activities
+                            print(f"💬 Using conversation-based preferences: {history_activities}")
+                        else:
+                            # Fallback: Try regex extraction for common activity patterns
+                            print(f"⚠️ LLM didn't extract activities - trying regex fallback")
+                            import re
+                            activity_keywords = [
+                                'football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
+                                'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
+                                'tech', 'coding', 'startup', 'business', 'networking', 'food', 'cooking',
+                                'boardgaming', 'board games', 'social_deductions', 'book_club', 'box_cricket',
+                                'films', 'poetry', 'writing', 'basketball', 'volleyball', 'chess', 'gaming'
+                            ]
+
+                            found_activities = []
+                            for activity in activity_keywords:
+                                # Match whole words only
+                                if re.search(rf'\b{re.escape(activity)}\b', recent_user_text.lower()):
+                                    found_activities.append(activity)
+
+                            if found_activities:
+                                print(f"✅ Regex found activities: {found_activities}")
+                                query_activities = found_activities
+                                has_specific_activities = True
+                                user_preferences['activities'] = found_activities
+                                print(f"💬 Using regex-based preferences: {found_activities}")
+                            else:
+                                print(f"❌ No activities found in conversation history")
+
             # If this is a generic event request without preferences or specific activities
             # Examples: "anything for me", "what's available", "show me events", "got plans?"
             if not has_preferences and not has_specific_activities:
@@ -3722,52 +4005,64 @@ Current user message: {user_message}"""
                 print(f"💾 Saved activities from root: {saved_activities}")
 
             # ============================================================================
-            # SMART PRIORITY SYSTEM FOR ACTIVITIES
+            # SMART PRIORITY SYSTEM - LLM-BASED INTENT DETECTION
             # ============================================================================
+            # Extract LLM intent classification
+            search_intent = query_analysis.get('search_intent', 'location_discovery')
+            is_personalized = query_analysis.get('is_personalized', False)
+            exclude_activities = query_analysis.get('exclude_activities', [])
+
             final_activities = []
             search_query = query
 
-            if should_override_saved and query_activities:
-                # User explicitly requested different activities - OVERRIDE saved preferences
-                final_activities = query_activities
-                search_query = ' '.join(query_activities)
-                print(f"🎯 OVERRIDE: Using query activities: {final_activities}")
-            elif is_specific_request and query_activities:
-                # User made a specific activity request - use it
-                final_activities = query_activities
-                search_query = ' '.join(query_activities)
-                print(f"🎯 SPECIFIC: Using query activities: {final_activities}")
-            elif saved_activities:
-                # Generic request or no specific activities - use saved preferences
-                final_activities = saved_activities
-                search_query = ' '.join(saved_activities)
-                print(f"💾 SAVED: Using saved activities: {final_activities}")
-            else:
-                # This block should RARELY be hit - means user passed line 3569 validation
-                # but saved_activities is still empty (data extraction issue)
-                print(f"⚠️ WARNING: Reached fallback block - saved_activities is empty")
-                print(f"   - has_preferences (from line 3564): {has_preferences}")
-                print(f"   - user_preferences: {user_preferences}")
-                print(f"   - saved_activities: {saved_activities}")
-                print(f"   - query_activities: {query_activities}")
-                print(f"   - is_specific_request: {is_specific_request}")
+            # Decision tree based on LLM classification
+            if search_intent == 'exclusion':
+                # Handle exclusion filtering (future feature)
+                final_activities = []
+                final_exclude = exclude_activities
+                search_query = query
+                print(f"🚫 EXCLUSION: Show ALL except {exclude_activities}")
 
-                # If user has preferences but saved_activities is empty, it's a data format issue
-                # Use city-based generic search as fallback instead of blocking
-                if user_preferences:
-                    print(f"⚠️ User has preferences but saved_activities is empty - data extraction issue")
-                    print(f"🔍 FALLBACK: Will use city-based generic event search")
-                    search_query = query  # Use original query, city will be added below
+            elif search_intent == 'activity_specific':
+                # Explicit activity mentioned, no personalization context
+                final_activities = query_activities
+                search_query = ' '.join(query_activities) if query_activities else query
+                print(f"🎯 ACTIVITY SPECIFIC: {final_activities} (no personalization)")
+
+            elif search_intent == 'personalized':
+                # User wants personalized recommendations
+                if query_activities:
+                    # Personalized with explicit activity override
+                    # Example: "board games around me" → use boardgaming but mark as personalized
+                    final_activities = query_activities
+                    search_query = ' '.join(query_activities)
+                    print(f"👤 PERSONALIZED (activity override): {final_activities}")
+                elif saved_activities:
+                    # Personalized using saved preferences
+                    # Example: "around me", "events for me" → use saved activities
+                    final_activities = saved_activities
+                    search_query = ' '.join(saved_activities)
+                    print(f"👤 PERSONALIZED (saved prefs): {final_activities}")
                 else:
-                    # This should have been caught at line 3569, but adding safety check
-                    print(f"🚨 CRITICAL: No preferences and no activities - should have been caught earlier!")
-                    return {
-                        "success": False,
-                        "recommendations": [],
-                        "total_found": 0,
-                        "message": "I'd love to help you find events! To give you personalized recommendations, please tell me what activities and interests you enjoy.",
-                        "needs_preferences": True
-                    }
+                    # Wants personalized but no preferences saved
+                    # This case is already handled by validation at line 3741
+                    print(f"⚠️ PERSONALIZED intent but no saved preferences - will ask for preferences")
+                    final_activities = []
+                    search_query = query
+
+            elif search_intent == 'location_discovery':
+                # Generic exploration, show ALL activities
+                # Example: "today top events", "what's happening"
+                final_activities = []
+                search_query = query
+                query_timing = query_analysis.get('timing', '')
+                print(f"🌟 LOCATION DISCOVERY: ALL activities (timing: {query_timing})")
+
+            else:
+                # Fallback to safe defaults
+                final_activities = []
+                search_query = query
+                print(f"⚠️ FALLBACK: Using original query with no activity filter")
 
             # Determine final search location
             final_location = query_location if query_location else (user_current_city if user_current_city else '')
@@ -4141,42 +4436,35 @@ Current user message: {user_message}"""
             # ⭐ EXPLICIT ACTIVITY VALIDATION - When user explicitly requests activities, validate results match
             if explicit_activity_request and explicit_activities:
                 print(f"🔍 Validating events match explicit request: {explicit_activities}")
+
+                # Convert explicit_activities to database format (uppercase) for strict matching
+                db_activities = [self.map_activity_to_db_type(act) for act in explicit_activities]
+                print(f"🔍 Database activity types to match: {db_activities}")
+
                 matched_events = []
-                
+                filtered_out_events = []
+
                 for event in relevant_events:
-                    event_activity = event.get('activity', '').lower()
-                    event_matches = False
-                    
-                    # Check if event matches any requested activity
-                    for requested_activity in explicit_activities:
-                        # Direct match
-                        if requested_activity.lower() in event_activity or event_activity in requested_activity.lower():
-                            event_matches = True
-                            print(f"✅ Direct match: {event.get('name', '')} - {event_activity} matches {requested_activity}")
-                            break
-                        
-                        # Check through activity mappings
-                        mapped_activities = activity_mappings.get(requested_activity.lower(), [])
-                        for mapped_activity in mapped_activities:
-                            if mapped_activity.lower() in event_activity or event_activity in mapped_activity.lower():
-                                event_matches = True
-                                print(f"✅ Mapped match: {event.get('name', '')} - {event_activity} matches {requested_activity} via {mapped_activity}")
-                                break
-                        
-                        if event_matches:
-                            break
-                    
-                    if event_matches:
+                    # Use the validate_event_activity helper for strict matching
+                    if self.validate_event_activity(event, db_activities):
                         matched_events.append(event)
+                        event_activity_display = self.format_activity_display(event.get('activity', ''))
+                        print(f"✅ Match: {event.get('name', '')} - {event_activity_display}")
                     else:
-                        print(f"❌ No match: {event.get('name', '')} - {event_activity} doesn't match {explicit_activities}")
-                
+                        filtered_out_events.append(event)
+                        event_activity = event.get('activity', 'Unknown')
+                        event_activity_display = self.format_activity_display(event_activity)
+                        print(f"❌ Filtered: {event.get('name', '')} - {event_activity_display} doesn't match {[self.format_activity_display(act) for act in db_activities]}")
+
                 relevant_events = matched_events
-                print(f"🎯 After explicit activity validation: {len(relevant_events)} events remain")
+                print(f"🎯 Activity validation: {len(matched_events)} matched, {len(filtered_out_events)} filtered out")
+                print(f"📊 Remaining events: {len(relevant_events)}")
                 
                 # If no events match the explicit request, return appropriate message
                 if len(relevant_events) == 0:
-                    requested_activities_str = ', '.join(explicit_activities)
+                    # Format activities with proper display names
+                    requested_activities_display = [self.format_activity_display(self.map_activity_to_db_type(act)) for act in explicit_activities]
+                    requested_activities_str = ', '.join(requested_activities_display)
                     # Use the guidance message generator for better response
                     guidance_message = self._generate_no_events_guidance_message_for_activity(
                         search_city, requested_activities_str, user_id
@@ -4425,7 +4713,9 @@ Current user message: {user_message}"""
                     }
                     formatted_events.append(event_data)
 
-                requested_activities_str = ', '.join(explicit_activities)
+                # Format activities with proper display names
+                requested_activities_display = [self.format_activity_display(self.map_activity_to_db_type(act)) for act in explicit_activities]
+                requested_activities_str = ', '.join(requested_activities_display)
                 # More conversational success message
                 if len(formatted_events) == 1:
                     success_message = f"Great! Found a perfect {requested_activities_str} event for you in {filter_city}!"
