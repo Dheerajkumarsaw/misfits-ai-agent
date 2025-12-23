@@ -645,8 +645,7 @@ def generate_smart_no_results_message(
         if user_prefs and 'metadata' in user_prefs:
             activities_summary = user_prefs.get('metadata', {}).get('activities_summary', '')
             if activities_summary:
-                # Try structured format first
-                import re
+                # Try structured format first (re is imported at top of file)
                 activity_matches = re.findall(r'\|([A-Za-z_]+)\|', activities_summary)
                 if not activity_matches and ',' in activities_summary:
                     # CSV format
@@ -1420,8 +1419,20 @@ def detect_intent_with_context(query: str, user_id: str, bot, session_mgr) -> di
     thanks_keywords = ['thanks', 'thank you', 'appreciate', 'great', 'awesome',
                       'perfect', 'amazing']
 
+    # Location/generic search keywords (should be new_search)
+    location_keywords = ['around me', 'near me', 'nearby', 'close to me',
+                        'in my area', 'here', 'close by', 'in the area']
+
     # Check keywords for fast return
-    if has_events and any(kw in query_lower for kw in best_keywords):
+    # IMPORTANT: Check location queries BEFORE greetings to avoid false matches
+    if any(kw in query_lower for kw in location_keywords):
+        print(f"✅ Fast keyword match: 'new_search' (location-based query)")
+        return {
+            "intent": "new_search",
+            "reasoning": "Location-based search query",
+            "confidence": 0.95
+        }
+    elif has_events and any(kw in query_lower for kw in best_keywords):
         print(f"✅ Fast keyword match: 'best_picks' (session has {events_count} events)")
         return {
             "intent": "best_picks",

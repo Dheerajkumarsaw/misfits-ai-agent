@@ -3845,7 +3845,7 @@ Current user message: {user_message}"""
                         else:
                             # Fallback: Try regex extraction for common activity patterns
                             print(f"⚠️ LLM didn't extract activities - trying regex fallback")
-                            import re
+                            # re is imported at top of file
                             activity_keywords = [
                                 'football', 'cricket', 'badminton', 'tennis', 'swimming', 'gym', 'yoga',
                                 'dance', 'music', 'art', 'photography', 'hiking', 'trekking', 'cycling',
