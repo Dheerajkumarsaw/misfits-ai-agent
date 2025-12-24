@@ -21,7 +21,7 @@ spec:
         - containerPort: 8000
         env:
         - name: CHROMA_HOST
-          value: "43.205.192.16"
+          value: "65.0.91.158"
         - name: CHROMA_PORT
           value: "8000"
         - name: TRANSFORMERS_OFFLINE

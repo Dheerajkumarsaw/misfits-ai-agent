@@ -132,7 +132,7 @@ class EventDetailsForAgent:
         }
 
 class ChromaDBManager:
-    def __init__(self, host: str = "43.205.192.16", port: int = 8000):
+    def __init__(self, host: str = "65.0.91.158", port: int = 8000):
         """
         Initialize ChromaDB manager with SentenceTransformer embeddings (remote server)
         

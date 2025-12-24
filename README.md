@@ -32,7 +32,7 @@ Ai Agents/
 
 - **Python 3.9+**
 - **pip** package manager
-- **ChromaDB Server** running at `43.205.192.16:8000` (already configured)
+- **ChromaDB Server** running at `65.0.91.158:8000` (already configured)
 
 ### 1. Virtual Environment Setup
 
@@ -94,7 +94,7 @@ chroma run --host 0.0.0.0 --port 8000
 docker run -d -p 8000:8000 chromadb/chroma
 ```
 
-**Note**: The project is configured to use a remote ChromaDB server at `43.205.192.16:8000`. You don't need to run a local ChromaDB server unless you want to test locally.
+**Note**: The project is configured to use a remote ChromaDB server at `65.0.91.158:8000`. You don't need to run a local ChromaDB server unless you want to test locally.
 
 ### 3. Running the Production API Server
 
@@ -384,7 +384,7 @@ taskkill /PID <PID> /F
 
 ```bash
 # Test ChromaDB server connectivity
-curl http://43.205.192.16:8000/api/v1/heartbeat
+curl http://65.0.91.158:8000/api/v1/heartbeat
 
 # If running local ChromaDB
 chroma run --host 0.0.0.0 --port 8000
@@ -422,7 +422,7 @@ curl -i -N \
 
 ```bash
 # ChromaDB Configuration
-export CHROMA_HOST=43.205.192.16
+export CHROMA_HOST=65.0.91.158
 export CHROMA_PORT=8000
 
 # Model Settings (for offline mode)
@@ -455,7 +455,7 @@ docker build -t misfits-event-recommendation:latest .
 # Run container
 docker run -d \
   -p 8000:8000 \
-  -e CHROMA_HOST=43.205.192.16 \
+  -e CHROMA_HOST=65.0.91.158 \
   -e CHROMA_PORT=8000 \
   --name event-api \
   misfits-event-recommendation:latest

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Core Technologies
 - **FastAPI** - Web framework for REST APIs and WebSocket support
-- **ChromaDB** - Vector database (Remote server at 43.205.192.16:8000)
+- **ChromaDB** - Vector database (Remote server at 65.0.91.158:8000)
 - **OpenAI/NVIDIA APIs** - LLM integration for conversational AI
 - **Sentence Transformers** - Semantic embeddings for event matching
 - **Docker/Kubernetes** - Container orchestration for deployment
@@ -36,7 +36,7 @@ Ai Agents/
 ### Component Structure
 
 ```
-Remote ChromaDB (43.205.192.16:8000)
+Remote ChromaDB (65.0.91.158:8000)
         ↑
         | HTTP API
         ↓
@@ -79,7 +79,7 @@ Remote ChromaDB (43.205.192.16:8000)
 
 - **learning/model-with-upload.py** - Enhanced version with file upload
   - CSV upload for user preferences
-  - Remote ChromaDB (43.205.192.16:8000)
+  - Remote ChromaDB (65.0.91.158:8000)
 
 - **learning/ai-agent-sync-data.py** - Local ChromaDB version
   - Original implementation with local storage
@@ -154,7 +154,7 @@ docker build -t misfits-event-recommendation:latest .
 # Run container locally
 docker run -d \
   -p 8000:8000 \
-  -e CHROMA_HOST=43.205.192.16 \
+  -e CHROMA_HOST=65.0.91.158 \
   -e CHROMA_PORT=8000 \
   misfits-event-recommendation:latest
 ```
@@ -180,7 +180,7 @@ kubectl scale deployment misfits-event-recommendation --replicas=5
 
 ```bash
 # ChromaDB Connection (Remote Server)
-CHROMA_HOST=43.205.192.16
+CHROMA_HOST=65.0.91.158
 CHROMA_PORT=8000
 
 # API Keys
@@ -195,7 +195,7 @@ HF_HUB_OFFLINE=1       # Prevent model downloads
 ## ChromaDB Remote Server Setup
 
 ### Current Configuration
-- **Host**: 43.205.192.16
+- **Host**: 65.0.91.158
 - **Port**: 8000
 - **Collections**: 
   - `meetup_events` - Event data with embeddings
@@ -208,13 +208,13 @@ from chromadb import HttpClient
 
 # Initialize client
 client = HttpClient(
-    host="43.205.192.16",
+    host="65.0.91.158",
     port=8000
 )
 
 # Or use ChromaDBManager
 chroma_manager = ChromaDBManager(
-    host="43.205.192.16",  # Defaults to this
+    host="65.0.91.158",  # Defaults to this
     port=8000
 )
 ```
@@ -223,7 +223,7 @@ chroma_manager = ChromaDBManager(
 
 The codebase has been migrated from local ChromaDB to remote server:
 - Old: Local persistent directory (`./chroma_db/`)
-- New: Remote HTTP API (43.205.192.16:8000)
+- New: Remote HTTP API (65.0.91.158:8000)
 
 Files already updated:
 - `live-chorma.py` - Uses remote by default
@@ -305,7 +305,7 @@ Files already updated:
 ```python
 # Test remote connection
 import chromadb
-client = chromadb.HttpClient(host="43.205.192.16", port=8000)
+client = chromadb.HttpClient(host="65.0.91.158", port=8000)
 print(client.list_collections())
 ```
 
@@ -314,7 +314,7 @@ print(client.list_collections())
 1. **ChromaDB Connection Failed**
    - Check if remote server is accessible
    - Verify CHROMA_HOST and CHROMA_PORT env vars
-   - Test with curl: `curl http://43.205.192.16:8000`
+   - Test with curl: `curl http://65.0.91.158:8000`
 
 2. **Model Download Issues**
    - Set TRANSFORMERS_OFFLINE=1 to use cached models
@@ -331,7 +331,7 @@ print(client.list_collections())
 ```python
 # Always use remote server configuration
 chroma_manager = ChromaDBManager(
-    host="43.205.192.16",  # Remote server
+    host="65.0.91.158",  # Remote server
     port=8000
 )
 
@@ -382,7 +382,7 @@ class EventDetailsForAgent:
 - Consider implementing API key authentication for production
 
 ### Network Security
-- ChromaDB server exposed publicly (43.205.192.16)
+- ChromaDB server exposed publicly (65.0.91.158)
 - Consider VPN or private network for production
 - Implement rate limiting on API endpoints
 

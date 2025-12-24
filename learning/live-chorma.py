@@ -169,11 +169,11 @@ class ChromaDBManager:
         Initialize ChromaDB manager with SentenceTransformer embeddings
         
         Args:
-            host: ChromaDB server hostname (defaults to env CHROMA_HOST or 43.205.192.16)
+            host: ChromaDB server hostname (defaults to env CHROMA_HOST or 65.0.91.158)
             port: ChromaDB server port (defaults to env CHROMA_PORT or 8000)
         """
         import os
-        self.host = host or os.getenv('CHROMA_HOST', '43.205.192.16')
+        self.host = host or os.getenv('CHROMA_HOST', '65.0.91.158')
         self.port = int(port or os.getenv('CHROMA_PORT', '8000'))
         print(f"🌐 Connecting to ChromaDB at: {self.host}:{self.port}")
         
