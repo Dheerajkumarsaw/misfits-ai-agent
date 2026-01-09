@@ -55,14 +55,12 @@ except ImportError as e:
 # Import new modules for enhancements
 try:
     from cache_manager import ServerCache
-    from session_manager import SessionManager
     from background_jobs import BackgroundJobs
     print("✅ Enhancement modules imported successfully")
 except ImportError as e:
     print(f"⚠️ Failed to import enhancement modules: {e}")
-    print("⚠️ Server will run without caching and session features")
+    print("⚠️ Server will run without caching features")
     ServerCache = None
-    SessionManager = None
     BackgroundJobs = None
 
 app = FastAPI(
@@ -148,7 +146,6 @@ bot_instance = None
 
 # Initialize enhancement instances (global singletons)
 cache_instance = None
-session_manager_instance = None
 background_jobs_instance = None
 
 def get_bot():
@@ -171,13 +168,6 @@ def get_cache():
         cache_instance = ServerCache(max_size=1000)
     return cache_instance
 
-def get_session_manager():
-    """Get or create session manager instance"""
-    global session_manager_instance
-    if session_manager_instance is None and SessionManager is not None:
-        session_manager_instance = SessionManager()
-    return session_manager_instance
-
 def get_background_jobs():
     """Get or create background jobs instance"""
     global background_jobs_instance
@@ -185,92 +175,6 @@ def get_background_jobs():
         bot = get_bot()
         background_jobs_instance = BackgroundJobs(bot)
     return background_jobs_instance
-
-def detect_activities_in_query(query: str) -> List[str]:
-    """
-    Detect activity keywords in user query
-
-    Args:
-        query: User's search query
-
-    Returns:
-        List of detected activities
-    """
-    # Comprehensive activity keywords with typo variations (39 activity types from all_activities_db)
-    activity_keywords = {
-        # Sports - Ball Games
-        'football': ['football', 'footballs', 'soccer', 'futsal', 'footbal', 'foot ball'],
-        'cricket': ['cricket', 'crickets', 'criket', 'crikett'],
-        'box_cricket': ['box cricket', 'indoor cricket', 'box criket'],
-        'badminton': ['badminton', 'badmintons', 'badmington', 'badminten', 'badmintom'],
-        'basketball': ['basketball', 'basketballs', 'hoops', 'basket ball', 'basketbal'],
-        'volleyball': ['volleyball', 'volleyballs', 'voleyball', 'vollyball', 'volley ball'],
-        'pickleball': ['pickleball', 'pickleballs', 'pickle ball', 'pickle balls', 'pickeball', 'picklebll', 'pickle-ball'],
-        'bowling': ['bowling', 'bowl', 'bowlin'],
-
-        # Sports - Fitness & Outdoor
-        'running': ['running', 'run', 'runs', 'marathon', 'marathons', 'sprint', 'sprints', 'jogging', 'runing'],
-        'cycling': ['cycling', 'bike', 'bikes', 'biking', 'bicycle', 'bicycles', 'cylcing', 'cyceling', 'cyclying'],
-        'yoga': ['yoga', 'yogas', 'fitness', 'yogo', 'youga'],
-        'hiking': ['hiking', 'hike', 'hikes', 'trek', 'treks', 'trekking', 'hikin', 'hikeing'],
-
-        # Arts & Creative
-        'dance': ['dance', 'dances', 'dancing', 'zumba', 'salsa', 'hip hop', 'hiphop', 'danc'],
-        'music': ['music', 'concert', 'concerts', 'jam', 'jams', 'band', 'bands', 'singing', 'jam session', 'jam sessions', 'musik', 'musix'],
-        'art': ['art', 'arts', 'painting', 'paintings', 'drawing', 'drawings', 'craft', 'crafts'],
-        'photography': ['photography', 'photo', 'photos', 'photoshoot', 'photoshoots', 'photograpy', 'photograhpy', 'photografy'],
-        'writing': ['writing', 'creative writing', 'writer', 'writers', 'writting', 'writng'],
-        'poetry': ['poetry', 'poems', 'poem', 'open mic', 'open mics', 'spoken word', 'poetri', 'poitry'],
-
-        # Entertainment & Social
-        'boardgaming': ['board game', 'board games', 'boardgame', 'boardgames', 'tabletop', 'tabletops',
-                       'borad game', 'borad games', 'bored game', 'bored games', 'bord game', 'bord games'],
-        'video_games': ['gaming', 'game', 'games', 'esports', 'esport', 'video game', 'video games', 'videogame', 'videogames', 'gamming', 'gameing'],
-        'chess': ['chess', 'ches'],
-        'drama': ['drama', 'dramas', 'theater', 'theaters', 'theatre', 'theatres', 'acting', 'play', 'plays', 'drame'],
-        'films': ['movie', 'movies', 'film', 'films', 'cinema', 'cinemas', 'flim', 'flims'],
-        'quiz': ['trivia', 'trivias', 'quiz', 'quizzes', 'quizz', 'quizes'],
-        'book_club': ['book club', 'book clubs', 'bookclub', 'bookclubs', 'reading', 'book', 'books', 'book-club'],
-        'social_deductions': ['social deduction', 'social deductions', 'social deducation', 'social deducations',
-                             'deduction', 'deductions', 'deducation', 'deducations',
-                             'mafia', 'werewolf', 'werewolves', 'among us', 'amoung us'],
-
-        # Professional & Community
-        'community_space': ['tech', 'techs', 'coding', 'programming', 'hackathon', 'hackathons', 'hackaton', 'hackathn',
-                           'developer', 'developers', 'bootcamp', 'bootcamps', 'boot camp', 'boot-camp',
-                           'software', 'networking', 'meetup', 'meetups', 'professional', 'professionals',
-                           'startup', 'startups', 'start up', 'start-up',
-                           'entrepreneur', 'entrepreneurs', 'entrepeneur', 'entreprenuer',
-                           'business', 'businesses', 'entrepreneurship', 'community', 'community space', 'technology'],
-        'content_creation': ['content creation', 'content creator', 'creators', 'influencer', 'influencers', 'creator', 'content-creation'],
-
-        # Lifestyle & Wellness
-        'food': ['food', 'foods', 'cooking', 'culinary', 'baking', 'cookin'],
-        'mindfulness': ['mindfulness', 'meditation', 'wellness', 'mental health', 'wellbeing',
-                       'mindfullness', 'mindfullnes', 'mindfullnss', 'mindfulnes'],
-        'journaling': ['journaling', 'journal', 'journals', 'diary', 'journalling'],
-        'inner_journey': ['inner journey', 'spiritual', 'spirituality', 'personal growth', 'self discovery', 'self-discovery', 'inner-journey'],
-
-        # Special Interest
-        'harry_potter': ['harry potter', 'hp', 'potterhead', 'potterheads', 'hogwarts', 'harry poter', 'harrypotter', 'harry-potter'],
-        'pop_culture': ['pop culture', 'popculture', 'pop', 'fandom', 'fandoms', 'pop-culture', 'popcultre'],
-        'travel': ['travel', 'travels', 'trip', 'trips', 'adventure', 'adventures', 'explore', 'exploration', 'travle', 'trvel'],
-
-        # Multi-purpose
-        'multi_activity_club': ['multi activity', 'multi-activity', 'mixed activities', 'various activities', 'multi activity club'],
-        'hni': ['hni', 'high net worth', 'premium', 'exclusive', 'luxury'],
-        'others': ['others', 'misc', 'miscellaneous', 'general', 'various']
-    }
-
-    query_lower = query.lower()
-    detected = []
-
-    for activity, keywords in activity_keywords.items():
-        if any(keyword in query_lower for keyword in keywords):
-            detected.append(activity)
-
-    return detected
-
 
 def map_activity_to_db_type(activity_names: List[str]) -> List[str]:
     """
@@ -750,9 +654,6 @@ async def startup_event():
         if cache:
             cache.load_from_disk(max_age_hours=1)
 
-        # Initialize session manager
-        session_mgr = get_session_manager()
-
         # Initialize bot
         bot = get_bot()
         stats = bot.chroma_manager.get_collection_stats()
@@ -1001,14 +902,14 @@ Just tell me what you're looking for, and I'll find the perfect events for you!"
             "preferences": {"current_city": request.user_current_city}
         }
 
-        # Get recommendations using the enhanced JSON method with extraction
-        print(f"🔍 Chat API: Calling get_recommendations_with_json_extraction with: {request_data}")
+        # Get recommendations using LangGraph state machine (with automatic fallback)
+        print(f"🔍 Chat API: Calling get_recommendations_with_graph with: {request_data}")
         try:
-            result = bot.get_recommendations_with_json_extraction(request_data)
+            result = bot.get_recommendations_with_graph(request_data)
             print(f"🔍 Chat API: Recommendations result success: {result.get('success', False)}")
             print(f"🔍 Chat API: Recommendations count: {len(result.get('recommendations', []))}")
         except Exception as e:
-            print(f"❌ Chat API: Error in get_recommendations_with_json_extraction: {e}")
+            print(f"❌ Chat API: Error in get_recommendations_with_graph: {e}")
             import traceback
             traceback.print_exc()
             result = {"success": False, "recommendations": [], "total_found": 0, "message": str(e)}
@@ -1346,596 +1247,72 @@ async def readiness():
         raise HTTPException(status_code=503, detail="Service is not ready. Please try again later.")
 
 # ============================================================================
-# CONTEXT-AWARE INTENT DETECTION HELPERS
+# WebSocket Endpoint - All conversation logic handled by LangGraph
 # ============================================================================
-
-def format_conversation(messages: list) -> str:
-    """Format conversation history for LLM prompt"""
-    if not messages:
-        return "(No previous conversation)"
-
-    formatted = []
-    for msg in messages:
-        role = msg.get('role', 'unknown')
-        content = msg.get('content', '')
-        formatted.append(f"{role}: {content}")
-
-    return "\n".join(formatted)
-
-
-def detect_intent_with_context(query: str, user_id: str, bot, session_mgr) -> dict:
-    """
-    Use LLM to detect user intent WITH full conversation and session context
-
-    This replaces keyword-based and stateless intent detection with a smart
-    context-aware system that understands:
-    - Conversation history (what user said before)
-    - Session state (does user have previous results?)
-    - Query semantics (what does the query mean in context?)
-
-    Args:
-        query: Current user query
-        user_id: User ID for conversation lookup
-        bot: MeetupBot instance (for conversation history)
-        session_mgr: SessionManager instance (for session state)
-
-    Returns:
-        {
-            "intent": "best_picks" | "show_more" | "new_search" | "greeting" | "gratitude",
-            "reasoning": "Explanation of why this intent was chosen",
-            "confidence": 0.0-1.0
-        }
-    """
-    # Get conversation history (last 5 messages)
-    conversation = bot._get_user_conversation_history(user_id) if user_id else []
-    recent_conversation = conversation[-5:] if len(conversation) > 5 else conversation
-
-    # Get session state
-    session_info = session_mgr.get_session_info(user_id) if (session_mgr and user_id) else None
-    has_session = session_info and session_info.get('total_events', 0) > 0
-    events_count = session_info.get('total_events', 0) if session_info else 0
-    shown_count = session_info.get('current_index', 0) if session_info else 0
-
-    # ============================================================================
-    # FAST PATH: Check common keywords first (skip LLM for obvious cases)
-    # ============================================================================
-    query_lower = query.lower().strip()
-    has_events = has_session and events_count > 0
-
-    # Best picks keywords
-    best_keywords = ['best', 'top', 'recommend', 'suggest', 'favorite', 'favourite',
-                    'best for me', 'top for me', 'which is best', 'help me choose',
-                    'pick for me', 'which one', 'decide', 'choose for me']
-
-    # Show more keywords
-    more_keywords = ['more', 'next', 'show more', 'what else', 'any more',
-                    'continue', 'load more', 'see more']
-
-    # Greeting keywords
-    greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good evening',
-                        'how are you', 'what\'s up', 'sup']
-
-    # Gratitude keywords
-    thanks_keywords = ['thanks', 'thank you', 'appreciate', 'great', 'awesome',
-                      'perfect', 'amazing']
-
-    # Location/generic search keywords (should be new_search)
-    location_keywords = ['around me', 'near me', 'nearby', 'close to me',
-                        'in my area', 'here', 'close by', 'in the area']
-
-    # Check keywords for fast return
-    # IMPORTANT: Check location queries BEFORE greetings to avoid false matches
-    if any(kw in query_lower for kw in location_keywords):
-        print(f"✅ Fast keyword match: 'new_search' (location-based query)")
-        return {
-            "intent": "new_search",
-            "reasoning": "Location-based search query",
-            "confidence": 0.95
-        }
-    elif has_events and any(kw in query_lower for kw in best_keywords):
-        print(f"✅ Fast keyword match: 'best_picks' (session has {events_count} events)")
-        return {
-            "intent": "best_picks",
-            "reasoning": f"Keyword match + session has {events_count} events",
-            "confidence": 0.9
-        }
-    elif has_events and any(kw in query_lower for kw in more_keywords):
-        print(f"✅ Fast keyword match: 'show_more' (session has {events_count} events)")
-        return {
-            "intent": "show_more",
-            "reasoning": f"Keyword match + session has {events_count} events",
-            "confidence": 0.9
-        }
-    elif any(kw in query_lower for kw in greeting_keywords):
-        print(f"✅ Fast keyword match: 'greeting'")
-        return {"intent": "greeting", "reasoning": "Keyword match", "confidence": 0.95}
-    elif any(kw in query_lower for kw in thanks_keywords):
-        print(f"✅ Fast keyword match: 'gratitude'")
-        return {"intent": "gratitude", "reasoning": "Keyword match", "confidence": 0.95}
-
-    # Build context-rich prompt for LLM
-    context_prompt = f"""You are analyzing a user's intent in an event recommendation chatbot.
-
-CONVERSATION HISTORY (last 5 messages):
-{format_conversation(recent_conversation)}
-
-SESSION STATE:
-- User has previous results: {"Yes" if has_session else "No"}
-- Total events available: {events_count}
-- Events already shown: {shown_count}
-- More events available: {"Yes" if (events_count > shown_count) else "No"}
-
-CURRENT USER QUERY: "{query}"
-
-TASK: Determine the user's intent from these 5 options:
-
-1. "best_picks" - User wants you to PICK/RECOMMEND the BEST event(s) from previously shown results
-   Examples: "best for me", "which one is best", "top picks", "recommend one", "help me choose",
-             "which should I attend", "your top pick", "most suitable", "pick for me"
-   Requirements: User MUST have previous results in session
-
-2. "show_more" - User wants to see MORE events from the same search
-   Examples: "more", "show more", "next", "what else", "any more", "continue", "load more"
-   Requirements: User MUST have previous results AND more events available
-
-3. "new_search" - User wants a NEW/DIFFERENT event search
-   Examples: "show me cricket events", "find football", "events in Mumbai", "dance classes",
-             any query with specific activity/location/timing
-   Use this when: User mentions new criteria OR has no previous results
-
-4. "greeting" - Casual greeting or small talk
-   Examples: "hi", "hello", "how are you", "hey", "good morning"
-
-5. "gratitude" - Thanking or appreciation
-   Examples: "thanks", "thank you", "appreciate it", "great", "awesome"
-
-CRITICAL RULES:
-- If session has NO results → "best_picks" and "show_more" are IMPOSSIBLE → must be "new_search" (or greeting/gratitude)
-- If query mentions specific activities (cricket, dance, etc.) → likely "new_search"
-- If query is generic like "best/top" AND user has results → likely "best_picks"
-- If user just got results and says "more/next" → "show_more"
-
-IMPORTANT: You MUST respond with ONLY a valid JSON object. Do NOT include any explanations, reasoning text, or markdown.
-Do NOT write "Okay, let's analyze..." or any other text. ONLY output the JSON.
-
-Example correct response:
-{{"intent": "best_picks", "reasoning": "User asked 'best for me' and has 2 previous dance events in session", "confidence": 0.95}}
-
-Your JSON response:"""
-
-    try:
-        # Call LLM with context
-        response = llm_client.chat.completions.create(
-            model="qwen/qwq-32b",
-            messages=[{"role": "user", "content": context_prompt}],
-            temperature=0.1,
-            max_tokens=200
-        )
-
-        # Check if response is valid
-        if not response or not response.choices or len(response.choices) == 0:
-            print(f"⚠️ Invalid API response structure")
-            return {
-                "intent": "new_search",
-                "reasoning": "Invalid API response",
-                "confidence": 0.5
-            }
-
-        # Parse LLM response
-        llm_response = response.choices[0].message.content
-        if llm_response is None:
-            llm_response = ""
-        llm_response = llm_response.strip()
-        print(f"🔍 DEBUG: Raw LLM response: {llm_response[:500] if llm_response else '(empty)'}")  # Show first 500 chars
-
-        # Handle empty response
-        if not llm_response:
-            print(f"⚠️ Empty LLM response, defaulting to new_search")
-            return {
-                "intent": "new_search",
-                "reasoning": "Empty LLM response",
-                "confidence": 0.5
-            }
-
-        # Extract JSON from response (handle markdown code blocks and conversational text)
-        if "```json" in llm_response:
-            llm_response = llm_response.split("```json")[1].split("```")[0].strip()
-        elif "```" in llm_response:
-            llm_response = llm_response.split("```")[1].split("```")[0].strip()
-        else:
-            # Try to find JSON object in conversational response
-            # Look for { ... } pattern with proper nesting
-            # Find first { and try to match balanced braces
-            start = llm_response.find('{')
-            if start != -1:
-                # Simple approach: find matching closing brace
-                brace_count = 0
-                end = -1
-                for i in range(start, len(llm_response)):
-                    if llm_response[i] == '{':
-                        brace_count += 1
-                    elif llm_response[i] == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            end = i + 1
-                            break
-
-                if end != -1:
-                    extracted_json = llm_response[start:end]
-                    print(f"🔍 Extracted JSON from conversational response: {extracted_json}")
-                    llm_response = extracted_json
-
-        # Try to parse JSON
-        result = json.loads(llm_response)
-
-        print(f"🤖 Context-Aware Intent Detection:")
-        print(f"   - Query: '{query}'")
-        print(f"   - Session: {events_count} events, {shown_count} shown")
-        print(f"   - Intent: {result.get('intent')}")
-        print(f"   - Reasoning: {result.get('reasoning')}")
-        print(f"   - Confidence: {result.get('confidence')}")
-
-        return result
-
-    except json.JSONDecodeError as e:
-        print(f"⚠️ JSON parsing failed: {e}")
-        print(f"   Raw response was: {llm_response[:200] if 'llm_response' in locals() else 'N/A'}")
-
-        # FALLBACK: Use keyword-based detection when LLM fails
-        print(f"🔄 Falling back to keyword-based intent detection")
-        query_lower = query.lower().strip()
-
-        # Check if user has session with events
-        has_events = has_session and events_count > 0
-
-        # Best picks keywords
-        best_keywords = ['best', 'top', 'recommend', 'suggest', 'favorite', 'favourite',
-                        'best for me', 'top for me', 'which is best', 'help me choose',
-                        'pick for me', 'which one', 'decide', 'choose for me']
-
-        # Show more keywords
-        more_keywords = ['more', 'next', 'show more', 'what else', 'any more',
-                        'continue', 'load more', 'see more']
-
-        # Greeting keywords
-        greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good evening',
-                            'how are you', 'what\'s up', 'sup']
-
-        # Gratitude keywords
-        thanks_keywords = ['thanks', 'thank you', 'appreciate', 'great', 'awesome',
-                          'perfect', 'amazing']
-
-        # Check keywords in order of priority
-        if has_events and any(kw in query_lower for kw in best_keywords):
-            print(f"✅ Keyword fallback: 'best_picks' (has {events_count} events)")
-            return {
-                "intent": "best_picks",
-                "reasoning": f"Keyword match + session has {events_count} events",
-                "confidence": 0.8
-            }
-        elif has_events and any(kw in query_lower for kw in more_keywords):
-            print(f"✅ Keyword fallback: 'show_more' (has {events_count} events)")
-            return {
-                "intent": "show_more",
-                "reasoning": f"Keyword match + session has {events_count} events",
-                "confidence": 0.8
-            }
-        elif any(kw in query_lower for kw in greeting_keywords):
-            print(f"✅ Keyword fallback: 'greeting'")
-            return {"intent": "greeting", "reasoning": "Keyword match", "confidence": 0.9}
-        elif any(kw in query_lower for kw in thanks_keywords):
-            print(f"✅ Keyword fallback: 'gratitude'")
-            return {"intent": "gratitude", "reasoning": "Keyword match", "confidence": 0.9}
-        else:
-            print(f"✅ Keyword fallback: 'new_search' (default)")
-            return {
-                "intent": "new_search",
-                "reasoning": "No keyword match, treating as new search",
-                "confidence": 0.6
-            }
-    except Exception as e:
-        print(f"⚠️ Context-aware intent detection failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "intent": "new_search",
-            "reasoning": f"Error in LLM detection: {str(e)}",
-            "confidence": 0.5
-        }
-
 
 # Realtime chat over WebSocket
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
+    """
+    Simplified WebSocket endpoint - all logic delegated to LangGraph
+    """
     await websocket.accept()
+
     try:
         bot = get_bot()
         await websocket.send_json({"type": "ready", "message": "WebSocket connected"})
+
         while True:
+            # 1. Receive message from user
             raw = await websocket.receive_text()
             try:
                 payload = json.loads(raw)
             except Exception:
                 payload = {"query": raw}
 
-            query = payload.get("query") or payload.get("message") or ""
-            user_id = payload.get("user_id")
-            user_current_city = payload.get("user_current_city") or payload.get("city")
-
-            # Track user query in conversation history
-            if user_id and query:
-                bot._add_to_user_conversation(user_id, "user", query)
-                print(f"💬 Added user message to conversation: '{query}' (user_id: {user_id})")
-
-            # ============================================================================
-            # CONTEXT-AWARE INTENT DETECTION
-            # ============================================================================
-            # Use LLM with full conversation and session context to determine intent
-            # This replaces all keyword-based and stateless detection
-
-            session_mgr = get_session_manager()
-            intent_result = detect_intent_with_context(query, user_id, bot, session_mgr)
-            user_intent = intent_result.get("intent", "new_search")
-
-            # ============================================================================
-            # HANDLE INTENT-SPECIFIC ACTIONS
-            # ============================================================================
-
-            # Intent 1: BEST_PICKS - Return top events from session
-            if user_intent == "best_picks":
-                best_events = session_mgr.get_best_events(user_id, count=2)
-                if best_events:
-                    # Add similar events to each event
-                    for event in best_events:
-                        similar_ids_str = event.get('similar_event_ids', '[]')
-                        try:
-                            similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
-                            if similar_ids and len(similar_ids) > 0:
-                                similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
-                                if similar_events_data and similar_events_data.get('metadatas'):
-                                    event['similar_events'] = similar_events_data['metadatas']
-                        except Exception as e:
-                            print(f"⚠️ Failed to fetch similar events: {e}")
-
-                    # Generate best picks message
-                    best_picks_msg = generate_conversational_message(
-                        message_type="best_picks",
-                        context={
-                            "pick_count": len(best_events),
-                            "criteria": "match score and preferences",
-                            "activity": ""
-                        }
-                    )
-
-                    await websocket.send_json({
-                        "type": "response",
-                        "success": True,
-                        "message": best_picks_msg,
-                        "recommendations": best_events,
-                        "total_found": len(best_events)
-                    })
-                    continue
-                else:
-                    print(f"⚠️ best_picks intent but no events in session")
-
-            # Intent 2: SHOW_MORE - Return next batch from session
-            elif user_intent == "show_more":
-                if session_mgr:
-                    next_events = session_mgr.get_next_events(user_id, count=3)
-                    if next_events:
-                        session_info = session_mgr.get_session_info(user_id)
-
-                        # Add similar events
-                        for event in next_events:
-                            similar_ids_str = event.get('similar_event_ids', '[]')
-                            try:
-                                similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
-                                if similar_ids and len(similar_ids) > 0:
-                                    similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
-                                    if similar_events_data and similar_events_data.get('metadatas'):
-                                        event['similar_events'] = similar_events_data['metadatas']
-                            except Exception as e:
-                                print(f"⚠️ Failed to fetch similar events: {e}")
-
-                        show_more_msg = generate_conversational_message(
-                            message_type="show_more",
-                            context={
-                                "new_count": len(next_events),
-                                "total_shown": session_info.get('current_index', 0),
-                                "total_available": session_info.get('total_events', 0),
-                                "activity": ""
-                            }
-                        )
-
-                        await websocket.send_json({
-                            "type": "response",
-                            "success": True,
-                            "message": show_more_msg,
-                            "recommendations": next_events,
-                            "total_found": session_info.get('total_events', len(next_events)),
-                            "has_more": session_info.get('has_more', False)
-                        })
-                        continue
-                else:
-                    # No more events
-                    end_msg = generate_conversational_message(
-                        message_type="end_of_results",
-                        context={"total_shown": 0, "activity": "", "city": user_current_city}
-                    )
-                    await websocket.send_json({
-                        "type": "response",
-                        "success": False,
-                        "message": end_msg,
-                        "recommendations": [],
-                        "total_found": 0,
-                        "has_more": False
-                    })
-                    continue
-
-            # Intent 3: GREETING - Casual conversation
-            elif user_intent == "greeting":
-                greeting_response = generate_conversational_message(
-                    message_type="greeting",
-                    context={"query": query, "user_id": user_id}
-                )
-                await websocket.send_json({
-                    "type": "response",
-                    "success": True,
-                    "message": greeting_response,
-                    "recommendations": [],
-                    "total_found": 0
-                })
-                continue
-
-            # Intent 4: GRATITUDE - Thank you responses
-            elif user_intent == "gratitude":
-                gratitude_response = generate_conversational_message(
-                    message_type="gratitude",
-                    context={"query": query}
-                )
-                await websocket.send_json({
-                    "type": "response",
-                    "success": True,
-                    "message": gratitude_response,
-                    "recommendations": [],
-                    "total_found": 0
-                })
-                continue
-
-            # Intent 5: NEW_SEARCH - Falls through to get_recommendations_with_json_extraction below
-            # Also handles any unrecognized intents as new search
-
-            # Build recommendation request-compatible payload
+            # 2. Build request for graph
             request_data = {
-                "user_id": user_id,
-                "query": query,
-                "user_current_city": user_current_city,
-                "preferences": {}
+                "user_id": payload.get("user_id"),
+                "query": payload.get("query") or payload.get("message", ""),
+                "user_current_city": payload.get("user_current_city") or payload.get("city", "")
             }
-            if user_current_city:
-                request_data["preferences"]["current_city"] = user_current_city
 
-            # ✨ SIMPLIFIED FLOW: Let AI agent handle EVERYTHING
-            # Bot handles: activity detection, validation, filtering, message generation
-            print(f"🔍 WebSocket: Calling get_recommendations_with_json_extraction with: {request_data}")
-            try:
-                result = bot.get_recommendations_with_json_extraction(request_data)
-                print(f"✅ Bot returned: success={result.get('success')}, events={len(result.get('recommendations', []))}")
-            except Exception as e:
-                print(f"❌ WebSocket: Error calling bot: {e}")
-                import traceback
-                traceback.print_exc()
-                result = {
-                    "success": False,
-                    "recommendations": [],
-                    "total_found": 0,
-                    "message": "I'm having trouble processing that. Please try again!"
-                }
+            # 3. Call LangGraph - it handles EVERYTHING:
+            #    ✅ Intent detection (greeting, search, show_more, best_picks)
+            #    ✅ State management (conversation history, shown events)
+            #    ✅ Event search and filtering
+            #    ✅ Message generation (Miffy personality)
+            result = bot.get_recommendations_with_graph(request_data)
 
-            # Handle preference collection request from bot
-            if result.get('needs_preferences'):
-                print(f"🚨 Bot requesting user preferences")
-                await websocket.send_json({
-                    "type": "response",
-                    "success": False,
-                    "message": result.get('message', 'Please tell me what activities you enjoy.'),
-                    "recommendations": [],
-                    "total_found": 0,
-                    "needs_preferences": True
-                })
-                continue
-
-            # Get events from bot (already validated and filtered)
-            all_events = result.get("recommendations", [])
-
-            # Store events in session for "show more" functionality
-            session_mgr = get_session_manager()
-            if session_mgr and all_events:
-                session_mgr.store_events(user_id, all_events, query)
-                print(f"💾 Stored {len(all_events)} events in session for user_id: {user_id}, query: '{query}'")
-
-            # Show top 3 events initially
-            events_to_show = all_events[:3]
-
-            # Track shown events in session
-            if session_mgr and events_to_show:
-                session = session_mgr.create_or_get_session(user_id)
-                for event in events_to_show:
-                    event_id = event.get('event_id') or event.get('id')
-                    if event_id:
-                        session.shown_events.add(event_id)
-                session.current_index = len(events_to_show)
-
-            # Add similar events to each event
-            for event in events_to_show:
-                similar_ids_str = event.get('similar_event_ids', '[]')
-                try:
-                    similar_ids = json.loads(similar_ids_str) if isinstance(similar_ids_str, str) else similar_ids_str
-                    if similar_ids and len(similar_ids) > 0:
-                        similar_events_data = bot.chroma_manager.collection.get(ids=similar_ids[:3])
-                        if similar_events_data and similar_events_data.get('metadatas'):
-                            event['similar_events'] = similar_events_data['metadatas']
-                except Exception as e:
-                    print(f"⚠️ Failed to fetch similar events: {e}")
-
-            # Generate response message
-            if events_to_show:
-                # Success - use bot's message or generate intro
-                message = result.get('message') or generate_conversational_message(
-                    message_type="event_intro",
-                    context={
-                        "query": query,
-                        "event_count": len(events_to_show),
-                        "total_available": len(all_events),
-                        "activity_type": ""
-                    }
-                )
-                success = True
-                has_more = len(all_events) > 3
-                total_found = len(all_events)
-            else:
-                # No events - use bot's message
-                message = result.get('message', "I couldn't find events matching your search. Try different activities or locations!")
-                success = False
-                has_more = False
-                total_found = 0
-
-            response_data = {
+            # 4. Send response back to user
+            await websocket.send_json({
                 "type": "response",
-                "success": success,
-                "message": message,
-                "recommendations": events_to_show,
-                "total_found": total_found,
-                "has_more": has_more
-            }
+                "success": result.get("success", False),
+                "message": result.get("message", ""),
+                "recommendations": result.get("recommendations", []),
+                "total_found": result.get("total_found", 0),
+                "has_more": result.get("has_more", False),
+                "needs_preferences": result.get("needs_preferences", False)
+            })
 
-            # Track bot response in conversation history
-            if user_id and message:
-                bot._add_to_user_conversation(user_id, "assistant", message)
-                print(f"💬 Added bot response to conversation (user_id: {user_id})")
-
-            await websocket.send_json(response_data)
     except WebSocketDisconnect:
-        # Client disconnected
+        print("WebSocket client disconnected")
         return
+
     except Exception as e:
-        # Log error server-side for debugging
         print(f"❌ WebSocket Error: {e}")
         import traceback
         traceback.print_exc()
 
-        # Send user-friendly response (no error details exposed)
         try:
             await websocket.send_json({
-                "type": "response",
+                "type": "error",
                 "success": False,
-                "message": "I'm having trouble processing that. Please try again or rephrase your request!",
-                "recommendations": [],
-                "total_found": 0
+                "message": "Error processing request. Please try again."
             })
-        except Exception:
-            # Connection already closed, silently pass
-            pass
+        except:
+            pass  # Connection already closed
+
 
 if __name__ == "__main__":
     # Run with uvicorn for production

@@ -11,9 +11,14 @@ def install_package(package):
         __import__(package)
         print(f"✅ {package} already installed")
     except ImportError:
-        print(f"📦 Installing {package}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-        print(f"✅ {package} installed successfully")
+        print(f"⚠️ {package} not found, attempting install...")
+        try:
+            # Try with --break-system-packages for macOS Homebrew Python
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", package])
+            print(f"✅ {package} installed successfully")
+        except subprocess.CalledProcessError:
+            print(f"❌ Failed to install {package}. Please install manually:")
+            print(f"   python3 -m pip install --break-system-packages {package}")
 
 # Install all required packages
 print("🔧 Installing required packages...")
@@ -21,7 +26,7 @@ packages = ["openai", "pandas", "chromadb", "numpy", "typing-extensions", "reque
 for package in packages:
     install_package(package)
 
-print("✅ All packages installed!")
+print("✅ Package check complete!")
 
 # Now import all required libraries
 import pandas as pd
@@ -44,6 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Initialize the NVIDIA API client
 http_client = httpx.Client(timeout=30.0)
+
 client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key="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",
@@ -643,22 +649,17 @@ class ChromaDBManager:
                 user_name = str(pref.get("user_name") or pref.get("username") or pref.get("name") or "")
                 current_city = str(pref.get("current_city") or pref.get("city") or "")
                 activities = pref.get("user_activities") or []
-                activities_texts = []
+                activity_names = []  # Store ONLY activity names (not club metadata)
                 if isinstance(activities, list):
                     for act in activities:
                         if not isinstance(act, dict):
                             continue
-                        club_name = act.get("club_name", "")
                         activity = act.get("activity", "")
-                        act_city = act.get("city", "")
-                        areas = act.get("area", [])
-                        if isinstance(areas, list):
-                            areas_text = ", ".join([self._stringify_value(a) for a in areas if a is not None])
-                        else:
-                            areas_text = self._stringify_value(areas)
-                        attended = act.get("meetup_attended", "")
-                        activities_texts.append(f"{club_name}|{activity}|{act_city}|{areas_text}|{attended}")
-                activities_summary = " ; ".join(activities_texts)
+                        if activity and activity not in activity_names:
+                            activity_names.append(activity.upper())  # Store unique activity names only
+
+                # Join activity names (not full club records)
+                activities_summary = ", ".join(activity_names) if activity_names else ""
                 # CSV fallback: use plain activities_summary if structured activities not available
                 if not activities_summary:
                     csv_summary = pref.get("activities_summary")
@@ -760,17 +761,25 @@ class ChromaDBManager:
             }
             if filters:
                 # Build where clause supporting comparison operators
-                where = {}
-                for key, value in filters.items():
-                    if isinstance(value, dict):
-                        # Already has operator (e.g., {"$gte": "2025-12-01"})
-                        where[key] = value
-                    else:
-                        # Simple equality
-                        where[key] = {"$eq": value}
+                # Check if filters already contain logical operators ($and, $or, $not)
+                logical_operators = {"$and", "$or", "$not"}
 
-                if where:
-                    params["where"] = where
+                if any(key in logical_operators for key in filters.keys()):
+                    # Filters already structured with logical operators, use directly
+                    params["where"] = filters
+                else:
+                    # Build where clause for simple filters
+                    where = {}
+                    for key, value in filters.items():
+                        if isinstance(value, dict):
+                            # Already has operator (e.g., {"$gte": "2025-12-01"})
+                            where[key] = value
+                        else:
+                            # Simple equality
+                            where[key] = {"$eq": value}
+
+                    if where:
+                        params["where"] = where
 
             results = self.collection.query(**params)
 
@@ -1994,7 +2003,11 @@ class MeetupBot:
         print("✅ Performance caching system initialized")
 
         self.events_data = None
+
+        # LEGACY: Manual conversation tracking for fallback/CLI mode only
+        # (LangGraph handles conversation state for production API endpoints)
         self.user_conversations = {}  # Store conversation history per user_id
+
         self.chroma_manager = ChromaDBManager()
         self.event_sync_manager = EventSyncManager(self.chroma_manager)
         self.user_pref_sync_manager = UserPreferenceSyncManager(self.chroma_manager)
@@ -2029,6 +2042,51 @@ class MeetupBot:
         ]
 
         print("✅ Activity similarity matching initialized")
+
+        # ============================================================================
+        # LANGGRAPH STATE MACHINE INITIALIZATION
+        # ============================================================================
+        try:
+            from graph_tools import ChromaDBTool, LLMTool, EventFormatterTool
+            from conversation_graph import create_conversation_graph, create_sqlite_checkpointer
+
+            # Initialize tools for graph nodes
+            self.graph_tools = {
+                'chroma': ChromaDBTool(self.chroma_manager),
+                'llm': LLMTool(client),
+                'formatter': EventFormatterTool()
+            }
+
+            # Create SQLite checkpointer for state persistence
+            try:
+                self.graph_checkpointer = create_sqlite_checkpointer("conversation_state.db")
+            except Exception as e:
+                print(f"⚠️ Could not create SQLite checkpointer: {e}")
+                print("⚠️ Graph will run without state persistence")
+                self.graph_checkpointer = None
+
+            # Create and compile the conversation graph with checkpointing
+            self.conversation_graph = create_conversation_graph(
+                self.graph_tools,
+                checkpointer=self.graph_checkpointer
+            )
+            print("✅ LangGraph conversation state machine initialized")
+
+        except ImportError as e:
+            print(f"⚠️ LangGraph not available (missing dependency): {e}")
+            print("⚠️ Install with: pip install langgraph==0.2.61 langchain-core==0.3.39 langgraph-checkpoint==2.0.12")
+            print("⚠️ Falling back to legacy conversation management")
+            self.conversation_graph = None
+            self.graph_tools = None
+            self.graph_checkpointer = None
+        except Exception as e:
+            print(f"⚠️ LangGraph initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print("⚠️ Falling back to legacy conversation management")
+            self.conversation_graph = None
+            self.graph_tools = None
+            self.graph_checkpointer = None
 
         # Start daily user sync at 12 AM IST
         print("🔄 Starting daily user preference sync (12:00 AM IST)...")
@@ -2335,22 +2393,27 @@ class MeetupBot:
         except (ValueError, TypeError):
             return 0
 
+    # ========================================================================
+    # LEGACY: Manual conversation tracking for fallback/CLI mode only
+    # Production API uses LangGraph state machine (see get_recommendations_with_graph)
+    # ========================================================================
+
     def _get_user_conversation_history(self, user_id: str = None):
-        """Get conversation history for specific user"""
+        """Get conversation history for specific user (LEGACY - used by fallback/CLI only)"""
         if not user_id:
             return []
         if user_id not in self.user_conversations:
             self.user_conversations[user_id] = []
         return self.user_conversations[user_id]
-    
+
     def _add_to_user_conversation(self, user_id: str, role: str, content: str):
-        """Add message to user-specific conversation history"""
+        """Add message to user-specific conversation history (LEGACY - used by fallback/CLI only)"""
         if not user_id:
             return
         if user_id not in self.user_conversations:
             self.user_conversations[user_id] = []
         self.user_conversations[user_id].append({"role": role, "content": content})
-        
+
         # Keep only last 10 messages per user to avoid memory bloat
         if len(self.user_conversations[user_id]) > 10:
             self.user_conversations[user_id] = self.user_conversations[user_id][-10:]
@@ -5362,6 +5425,95 @@ Current user message: {user_message}"""
                 "recommendations": [],
                 "message": f"Error: {str(e)}"
             }
+
+    def get_recommendations_with_graph(self, request_data: dict) -> dict:
+        """
+        NEW: LangGraph-powered recommendation engine with state management
+
+        This method uses the LangGraph state machine for intelligent conversation
+        flow and state management. It replaces manual intent detection and state
+        tracking with a structured graph-based approach.
+
+        Args:
+            request_data: Request dictionary with:
+                - user_id (str): User identifier
+                - query (str): User's search query
+                - user_current_city (str): User's current city
+                - preferences (dict, optional): Override preferences
+
+        Returns:
+            Response dictionary with:
+                - success (bool): Whether request succeeded
+                - message (str): Conversational response message
+                - recommendations (list): Event recommendations
+                - total_found (int): Total events found
+                - needs_preferences (bool): Flag if preferences needed
+                - has_more (bool): Whether more events available
+        """
+        try:
+            # Check if graph is initialized
+            if not self.conversation_graph:
+                print("⚠️ LangGraph not available, falling back to legacy method")
+                return self.get_recommendations_with_json_extraction(request_data)
+
+            # Import graph state utilities
+            from graph_state import create_initial_state
+
+            # Extract request parameters
+            user_id = request_data.get('user_id', 'anonymous')
+            query = request_data.get('query', '')
+            user_city = request_data.get('user_current_city', '')
+
+            print(f"🔍 Graph-based recommendation: user_id={user_id}, query='{query}', city={user_city}")
+
+            # Create initial conversation state
+            initial_state = create_initial_state(
+                user_id=user_id,
+                user_city=user_city,
+                query=query
+            )
+
+            # Invoke the graph with thread_id for state persistence
+            # Each user gets their own conversation thread
+            config = {"configurable": {"thread_id": user_id}}
+
+            print(f"🚀 Invoking LangGraph conversation flow (thread_id: {user_id})...")
+            final_state = self.conversation_graph.invoke(initial_state, config)
+
+            # Safety check: ensure final_state is not None
+            if final_state is None:
+                print(f"❌ Graph returned None - falling back to legacy method")
+                return self.get_recommendations_with_json_extraction(request_data)
+
+            print(f"✅ Graph execution complete - Intent: {final_state.get('intent')}")
+            if self.graph_checkpointer:
+                print(f"💾 State saved to SQLite for user {user_id}")
+
+            # Extract results from final state
+            response = {
+                "success": len(final_state.get('events_to_show', [])) > 0,
+                "message": final_state.get('response_message', 'No message generated'),
+                "recommendations": final_state.get('events_to_show', []),
+                "total_found": len(final_state.get('full_event_list', [])),
+                "needs_preferences": final_state.get('needs_preferences', False),
+                "has_more": final_state.get('has_more_events', False),
+                # Additional metadata
+                "intent": final_state.get('intent'),
+                "total_shown": final_state.get('total_events_shown', 0)
+            }
+
+            print(f"📊 Graph Response: success={response['success']}, events={len(response['recommendations'])}, has_more={response['has_more']}")
+
+            return response
+
+        except Exception as e:
+            print(f"❌ Graph execution error: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Fallback to legacy method on error
+            print("🔄 Falling back to legacy recommendation method")
+            return self.get_recommendations_with_json_extraction(request_data)
 
 if __name__ == "__main__":
     # Create bot instance with auto-sync enabled (default)

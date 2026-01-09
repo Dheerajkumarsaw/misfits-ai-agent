@@ -5,3 +5,31 @@
 model/cache_dump.pkl
 *.pyc
 __pycache__/
+model/__pycache__/
+
+# Database files
+model/conversation_state.db
+conversation_state.db
+*.db
+*.db-shm
+*.db-wal
+
+# Environment and secrets
+.env
+.env.local
+*.key
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary documentation
+*_SUMMARY.md
+*_MIGRATION.md
